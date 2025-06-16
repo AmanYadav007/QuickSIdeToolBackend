@@ -3,14 +3,13 @@ from PyPDF2 import PdfReader, PdfWriter, errors # Import errors for specific exc
 from flask_cors import CORS
 import io
 import logging
-import fitz # Import PyMuPDF for compression
 
 # Initialize Flask app
-app = Flask(__name__) # Changed from __no_name__ to __name__ for standard practice
+app = Flask(__name__)
 CORS(app)  # Enable CORS for cross-origin requests
 
 # Configure logging
-logging.basicConfig(level=logging.INFO) # Changed to INFO, DEBUG can be very verbose
+logging.basicConfig(level=logging.INFO)
 
 # Root route for health check or info
 @app.route('/')
@@ -106,21 +105,10 @@ def lock_pdf():
     try:
         reader = PdfReader(file.stream)
 
-        # Optional: Check if PDF is already encrypted with the same password
-        # This part is a bit tricky with PyPDF2 as it doesn't easily tell you
-        # *which* password it's encrypted with without attempting to decrypt.
-        # For simplicity, if it's already encrypted, we'll just re-encrypt it,
-        # which effectively changes the password if different, or keeps it the same.
-        # If you truly want to prevent re-locking with the same password,
-        # you'd need to try decrypting with the given password first,
-        # which might not be desirable for a "lock" operation.
-        # So, the current approach is generally fine: just encrypt it.
-
         writer = PdfWriter()
         for page in reader.pages:
             writer.add_page(page)
 
-        # Encrypt the PDF with the provided password
         writer.encrypt(password)
 
         output = io.BytesIO()
@@ -204,58 +192,6 @@ def remove_pdf_links():
         return jsonify({"error": f"Failed to remove links from PDF: An unexpected server error occurred: {str(e)}. It might be corrupted or complex."}), 500
 
 
-# PDF COMPRESSION ENDPOINT (using PyMuPDF)
-@app.route('/compress_pdf', methods=['POST'])
-def compress_pdf():
-    if 'pdf_file' not in request.files:
-        logging.error("Compress PDF: No PDF file provided.")
-        return jsonify({"error": "No PDF file provided"}), 400
-
-    pdf_file = request.files['pdf_file']
-    if pdf_file.filename == '':
-        logging.error("Compress PDF: No selected file.")
-        return jsonify({"error": "No selected file"}), 400
-    if not pdf_file.filename.lower().endswith('.pdf'):
-        logging.error(f"Compress PDF: Invalid file type uploaded: {pdf_file.filename}")
-        return jsonify({"error": "Only PDF files are accepted"}), 400
-
-    try:
-        input_pdf_bytes = pdf_file.read()
-        doc = fitz.open(stream=input_pdf_bytes, filetype="pdf")
-
-        output_buffer = io.BytesIO()
-        doc.save(
-            output_buffer,
-            garbage=4,          # Remove unused objects
-            deflate=True,       # Apply Flate compression to streams (text, vector graphics)
-            clean=True,         # Perform additional cleanup
-            pretty=False,       # Don't pretty-print objects (saves minor space)
-            # You can uncomment and adjust these for image-specific compression:
-            # img=fitz.PDF_NAME_DCTDECODE, # Force images to JPEG. This can significantly reduce size
-            # img_quality=75,              # JPEG quality for recompressed images (0-100). Adjust as needed.
-        )
-        doc.close()
-        output_buffer.seek(0)
-
-        logging.info(f"Compress PDF: Successfully compressed and sent '{pdf_file.filename}'.")
-        return send_file(
-            output_buffer,
-            mimetype='application/pdf',
-            as_attachment=True,
-            download_name=f"compressed_{pdf_file.filename}" # Dynamic download name
-        )
-
-    except fitz.FileDataError as e:
-        logging.error(f"Compress PDF: PyMuPDF error reading file '{pdf_file.filename}': {e}")
-        return jsonify({"error": f"Failed to compress PDF: Corrupted file or invalid PDF structure."}), 400
-    except Exception as e:
-        logging.error(f"Error compressing PDF '{pdf_file.filename}': {e}", exc_info=True)
-        return jsonify({"error": f"Failed to compress PDF: An unexpected server error occurred: {str(e)}"}), 500
-
-
 # Main entry point
 if __name__ == '__main__':
-    # Run Flask app on port 4000
-    # For production, consider using a production-ready WSGI server like Gunicorn or uWSGI
-    # e.g., gunicorn -w 4 -b 0.0.0.0:4000 app:app
     app.run(debug=True, host='0.0.0.0', port=4000)
