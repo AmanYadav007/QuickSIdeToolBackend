@@ -47,9 +47,9 @@ def unlock_pdf():
             return jsonify({"error": "This PDF is not encrypted. Cannot unlock."}), 400
 
         try:
-            # PyPDF2's decrypt method returns 0 for incorrect password, 1 for correct password
-            # It can also raise an exception for other issues like corrupted file.
             decrypt_result = reader.decrypt(password)
+            
+            # --- START CHANGES ---
             if decrypt_result == 0:
                 logging.warning(f"Unlock PDF: Incorrect password for '{file.filename}'.")
                 return jsonify({"error": "Incorrect password for this PDF."}), 400
@@ -72,9 +72,10 @@ def unlock_pdf():
                     download_name=f"unlocked_{file.filename}"
                 )
             else:
-                # This case is theoretical based on PyPDF2 docs, but good for robustness
+                # Handle the unexpected result '2' or any other non-0, non-1 values
                 logging.error(f"Unlock PDF: Unexpected decryption result '{decrypt_result}' for '{file.filename}'.")
-                return jsonify({"error": "An unexpected issue occurred during decryption. Please try again."}), 500
+                return jsonify({"error": "Failed to unlock PDF due to an unexpected decryption issue. The PDF might be corrupted or encrypted in an unsupported way."}), 500
+            # --- END CHANGES ---
 
         except errors.FileTruncatedError as e:
             logging.error(f"Unlock PDF: Corrupted PDF file '{file.filename}' during decryption: {e}")
@@ -90,7 +91,7 @@ def unlock_pdf():
         logging.error(f"General error in unlock_pdf for '{file.filename}': {e}", exc_info=True)
         return jsonify({"error": f"Failed to unlock PDF: An unexpected server error occurred: {str(e)}"}), 500
 
-# Lock PDF endpoint
+# Lock PDF endpoint (No changes needed based on the logs you provided)
 @app.route('/lock-pdf', methods=['POST'])
 def lock_pdf():
     # Check for file and password in request
@@ -114,23 +115,11 @@ def lock_pdf():
 
     try:
         reader = PdfReader(file.stream)
-
-        # You *can* lock an already encrypted PDF, PyPDF2 will re-encrypt it.
-        # However, if the intent is to only lock unencrypted PDFs, add a check:
-        # if reader.is_encrypted:
-        #     logging.info(f"Lock PDF: File '{file.filename}' is already encrypted. Consider unlocking first.")
-        #     return jsonify({"error": "This PDF is already encrypted. Unlock it first if you want to apply a new password."}), 400
-
+        
         writer = PdfWriter()
         for page in reader.pages:
             writer.add_page(page)
 
-        # Check if the PDF is already encrypted with the same password (optional, for UX)
-        # This part is tricky to implement reliably without attempting decryption first,
-        # which defeats the purpose of just locking.
-        # For simplicity, we assume if the user asks to lock, they want to apply this new password.
-        # If it was previously encrypted, this will overwrite the old encryption.
-        
         writer.encrypt(password)
 
         output = io.BytesIO()
@@ -152,7 +141,7 @@ def lock_pdf():
         return jsonify({"error": f"Failed to lock PDF: An unexpected server error occurred: {str(e)}"}), 500
 
 
-# PDF LINK REMOVER ENDPOINT (unchanged, but included for completeness)
+# PDF LINK REMOVER ENDPOINT (unchanged)
 @app.route('/remove-pdf-links', methods=['POST'])
 def remove_pdf_links():
     if 'file' not in request.files:
