@@ -1,5 +1,5 @@
 from flask import Flask, request, send_file, jsonify
-from PyPDF2 import PdfReader, PdfWriter, errors # Import errors for specific handling
+from PyPDF2 import PdfReader, PdfWriter, errors
 from flask_cors import CORS
 import io
 import logging
@@ -39,8 +39,8 @@ def unlock_pdf():
         return jsonify({"error": "Invalid file type. Only PDF files are accepted."}), 400
 
     try:
-        # Use PdfReader(file) directly as in your old working code
-        reader = PdfReader(file)
+        # Using file.stream as it's generally recommended for uploaded files
+        reader = PdfReader(file.stream)
 
         if not reader.is_encrypted:
             logging.info(f"Unlock PDF: File '{file.filename}' is not encrypted.")
@@ -73,7 +73,7 @@ def unlock_pdf():
         else:
             # Catch any other unexpected return value (like the '2' you saw)
             logging.error(f"Unlock PDF: PyPDF2.decrypt returned unexpected value: {decrypted} for '{file.filename}'.")
-            return jsonify({"error": "Failed to unlock PDF: An unexpected decryption issue occurred."}), 500
+            return jsonify({"error": "Failed to unlock PDF due to an unexpected decryption issue. The PDF might be corrupted or encrypted in an unsupported way."}), 500
 
     except errors.PdfReadError as e:
         logging.error(f"Error reading PDF file '{file.filename}' for unlock: {e}")
@@ -105,8 +105,8 @@ def lock_pdf():
         return jsonify({"error": "Invalid file type. Only PDF files are accepted."}), 400
 
     try:
-        # Use PdfReader(file) directly as in your old working code
-        reader = PdfReader(file)
+        # Using file.stream
+        reader = PdfReader(file.stream)
         
         writer = PdfWriter()
         for page in reader.pages:
@@ -133,7 +133,7 @@ def lock_pdf():
         return jsonify({"error": f"Failed to lock PDF: An unexpected server error occurred: {str(e)}"}), 500
 
 
-# PDF LINK REMOVER ENDPOINT (unchanged from your current version)
+# PDF LINK REMOVER ENDPOINT (unchanged, but included for completeness)
 @app.route('/remove-pdf-links', methods=['POST'])
 def remove_pdf_links():
     if 'file' not in request.files:
