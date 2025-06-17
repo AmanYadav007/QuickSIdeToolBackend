@@ -1,5 +1,5 @@
 from flask import Flask, request, send_file, jsonify
-from PyPDF2 import PdfReader, PdfWriter, errors # Import errors for specific exception handling
+from PyPDF2 import PdfReader, PdfWriter, errors
 from flask_cors import CORS
 import io
 import logging
@@ -41,43 +41,53 @@ def unlock_pdf():
     try:
         reader = PdfReader(file.stream)
 
+        # Check if the PDF is encrypted at all
         if not reader.is_encrypted:
-            logging.info(f"Unlock PDF: File '{file.filename}' is not encrypted.")
-            return jsonify({"error": "This PDF is not encrypted."}), 400
+            logging.info(f"Unlock PDF: File '{file.filename}' is not encrypted. No action needed.")
+            return jsonify({"error": "This PDF is not encrypted. Cannot unlock."}), 400
 
         try:
             # PyPDF2's decrypt method returns 0 for incorrect password, 1 for correct password
-            # or raises an exception for other issues like corrupted file.
-            if reader.decrypt(password) != 1:
+            # It can also raise an exception for other issues like corrupted file.
+            decrypt_result = reader.decrypt(password)
+            if decrypt_result == 0:
                 logging.warning(f"Unlock PDF: Incorrect password for '{file.filename}'.")
                 return jsonify({"error": "Incorrect password for this PDF."}), 400
+            elif decrypt_result == 1:
+                logging.info(f"Unlock PDF: Successfully decrypted '{file.filename}'.")
+                # Proceed to create a new PDF without encryption
+                writer = PdfWriter()
+                for page in reader.pages:
+                    writer.add_page(page)
+
+                output = io.BytesIO()
+                writer.write(output)
+                output.seek(0)
+
+                logging.info(f"Unlock PDF: Successfully unlocked and sent '{file.filename}'.")
+                return send_file(
+                    output,
+                    mimetype='application/pdf',
+                    as_attachment=True,
+                    download_name=f"unlocked_{file.filename}"
+                )
+            else:
+                # This case is theoretical based on PyPDF2 docs, but good for robustness
+                logging.error(f"Unlock PDF: Unexpected decryption result '{decrypt_result}' for '{file.filename}'.")
+                return jsonify({"error": "An unexpected issue occurred during decryption. Please try again."}), 500
+
         except errors.FileTruncatedError as e:
-            logging.error(f"Unlock PDF: Corrupted PDF file '{file.filename}': {e}")
-            return jsonify({"error": "Failed to unlock PDF: Corrupted file or invalid structure."}), 400
-        except Exception as e: # Catch other potential decryption issues
-            logging.error(f"Unlock PDF: Unexpected error during decryption for '{file.filename}': {e}")
-            return jsonify({"error": f"Failed to unlock PDF: An unexpected error occurred during decryption: {str(e)}"}), 500
+            logging.error(f"Unlock PDF: Corrupted PDF file '{file.filename}' during decryption: {e}")
+            return jsonify({"error": "Failed to unlock PDF: Corrupted file or invalid structure. Cannot decrypt."}), 400
+        except Exception as e: # Catch other potential decryption issues (e.g., if PDF is malformed after decryption attempt)
+            logging.error(f"Unlock PDF: Unexpected error during decryption or processing for '{file.filename}': {e}", exc_info=True)
+            return jsonify({"error": f"Failed to unlock PDF: An unexpected error occurred: {str(e)}"}), 500
 
-        writer = PdfWriter()
-        for page in reader.pages:
-            writer.add_page(page)
-
-        output = io.BytesIO()
-        writer.write(output)
-        output.seek(0)
-
-        logging.info(f"Unlock PDF: Successfully unlocked and sent '{file.filename}'.")
-        return send_file(
-            output,
-            mimetype='application/pdf',
-            as_attachment=True,
-            download_name=f"unlocked_{file.filename}"
-        )
     except errors.PdfReadError as e:
-        logging.error(f"Error reading PDF file '{file.filename}': {e}")
+        logging.error(f"Error reading PDF file '{file.filename}' before unlock attempt: {e}")
         return jsonify({"error": f"Failed to read PDF: {str(e)}. It might be corrupted or malformed."}), 400
     except Exception as e:
-        logging.error(f"Error unlocking PDF '{file.filename}': {e}", exc_info=True) # exc_info to log traceback
+        logging.error(f"General error in unlock_pdf for '{file.filename}': {e}", exc_info=True)
         return jsonify({"error": f"Failed to unlock PDF: An unexpected server error occurred: {str(e)}"}), 500
 
 # Lock PDF endpoint
@@ -105,10 +115,22 @@ def lock_pdf():
     try:
         reader = PdfReader(file.stream)
 
+        # You *can* lock an already encrypted PDF, PyPDF2 will re-encrypt it.
+        # However, if the intent is to only lock unencrypted PDFs, add a check:
+        # if reader.is_encrypted:
+        #     logging.info(f"Lock PDF: File '{file.filename}' is already encrypted. Consider unlocking first.")
+        #     return jsonify({"error": "This PDF is already encrypted. Unlock it first if you want to apply a new password."}), 400
+
         writer = PdfWriter()
         for page in reader.pages:
             writer.add_page(page)
 
+        # Check if the PDF is already encrypted with the same password (optional, for UX)
+        # This part is tricky to implement reliably without attempting decryption first,
+        # which defeats the purpose of just locking.
+        # For simplicity, we assume if the user asks to lock, they want to apply this new password.
+        # If it was previously encrypted, this will overwrite the old encryption.
+        
         writer.encrypt(password)
 
         output = io.BytesIO()
@@ -130,7 +152,7 @@ def lock_pdf():
         return jsonify({"error": f"Failed to lock PDF: An unexpected server error occurred: {str(e)}"}), 500
 
 
-# PDF LINK REMOVER ENDPOINT
+# PDF LINK REMOVER ENDPOINT (unchanged, but included for completeness)
 @app.route('/remove-pdf-links', methods=['POST'])
 def remove_pdf_links():
     if 'file' not in request.files:
