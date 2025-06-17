@@ -1,5 +1,6 @@
 from flask import Flask, request, send_file, jsonify
-from PyPDF2 import PdfReader, PdfWriter, errors
+# from PyPDF2 import PdfReader, PdfWriter, errors # REMOVED PyPDF2
+import pikepdf # ADDED pikepdf
 from flask_cors import CORS
 import io
 import logging
@@ -39,47 +40,51 @@ def unlock_pdf():
         return jsonify({"error": "Invalid file type. Only PDF files are accepted."}), 400
 
     try:
-        # Using file.stream as it's generally recommended for uploaded files
-        reader = PdfReader(file.stream)
+        # pikepdf.open can take a file-like object or a path
+        # It raises various exceptions on errors
+        try:
+            # Try to open without a password first to check if it's encrypted
+            pdf = pikepdf.Pdf.open(file.stream)
+            # If successful, it means it was not encrypted, or it was opened without needing a password.
+            # In unlock context, if it was encrypted and we opened it without password, it means incorrect password.
+            # However, if it opened without error and we are in unlock mode, it means it wasn't encrypted.
+            if not pdf.is_encrypted:
+                logging.info(f"Unlock PDF: File '{file.filename}' is not encrypted. Cannot unlock.")
+                return jsonify({"error": "This PDF is not encrypted. Cannot unlock."}), 400
+            # If it reached here, it means it *was* encrypted but opened without a password,
+            # indicating a potential logic error or that PyPDF2 encrypted it weakly.
+            # However, pikepdf.Pdf.open should raise an error if it's password-protected.
+            # Let's re-open with the password.
+            file.stream.seek(0) # Reset stream position for re-opening
+            pdf = pikepdf.Pdf.open(file.stream, password=password)
 
-        if not reader.is_encrypted:
-            logging.info(f"Unlock PDF: File '{file.filename}' is not encrypted.")
-            return jsonify({"error": "This PDF is not encrypted."}), 400
-        
-        # Explicitly check the decrypt result
-        # PyPDF2's decrypt method returns 0 for incorrect password, 1 for correct password
-        decrypted = reader.decrypt(password)
-        
-        if decrypted == 0: # Incorrect password
+
+        except pikepdf.PasswordError:
             logging.warning(f"Unlock PDF: Incorrect password for '{file.filename}'.")
             return jsonify({"error": "Incorrect password for this PDF."}), 400
-        elif decrypted == 1: # Successfully decrypted
-            logging.info(f"Unlock PDF: Successfully decrypted '{file.filename}'. Proceeding to write.")
-            writer = PdfWriter()
-            for page in reader.pages:
-                writer.add_page(page)
+        except pikepdf.PdfError as e: # Catch other pikepdf specific errors (e.g., malformed PDF)
+            logging.error(f"Unlock PDF: pikepdf error during open/decrypt for '{file.filename}': {e}")
+            return jsonify({"error": f"Failed to unlock PDF: Invalid PDF file or corrupted encryption: {str(e)}"}), 400
+        except Exception as e:
+            logging.error(f"Unlock PDF: Unexpected error during pikepdf open/decrypt for '{file.filename}': {e}", exc_info=True)
+            return jsonify({"error": f"Failed to unlock PDF: An unexpected error occurred: {str(e)}"}), 500
 
-            output = io.BytesIO()
-            writer.write(output)
-            output.seek(0)
+        # If we reach here, the PDF was successfully opened and implicitly decrypted by pikepdf.open
+        # We now just need to save it without encryption.
+        output = io.BytesIO()
+        pdf.save(output) # Saves without encryption if opened successfully decrypted
+        output.seek(0)
 
-            logging.info(f"Unlock PDF: Successfully unlocked and sent '{file.filename}'.")
-            return send_file(
-                output,
-                mimetype='application/pdf',
-                as_attachment=True,
-                download_name=f"unlocked_{file.filename}"
-            )
-        else:
-            # Catch any other unexpected return value (like the '2' you saw)
-            logging.error(f"Unlock PDF: PyPDF2.decrypt returned unexpected value: {decrypted} for '{file.filename}'.")
-            return jsonify({"error": "Failed to unlock PDF due to an unexpected decryption issue. The PDF might be corrupted or encrypted in an unsupported way."}), 500
+        logging.info(f"Unlock PDF: Successfully unlocked and sent '{file.filename}'.")
+        return send_file(
+            output,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=f"unlocked_{file.filename}"
+        )
 
-    except errors.PdfReadError as e:
-        logging.error(f"Error reading PDF file '{file.filename}' for unlock: {e}")
-        return jsonify({"error": f"Failed to read PDF: {str(e)}. It might be corrupted or malformed."}), 400
     except Exception as e:
-        logging.error(f"General error unlocking PDF '{file.filename}': {e}", exc_info=True)
+        logging.error(f"General error in unlock_pdf for '{file.filename}': {e}", exc_info=True)
         return jsonify({"error": f"Failed to unlock PDF: An unexpected server error occurred: {str(e)}"}), 500
 
 # Lock PDF endpoint
@@ -105,17 +110,23 @@ def lock_pdf():
         return jsonify({"error": "Invalid file type. Only PDF files are accepted."}), 400
 
     try:
-        # Using file.stream
-        reader = PdfReader(file.stream)
-        
-        writer = PdfWriter()
-        for page in reader.pages:
-            writer.add_page(page)
-
-        writer.encrypt(password)
+        # Open the PDF using pikepdf
+        # If it's already encrypted and you don't provide a password,
+        # pikepdf might still open it but with limited access.
+        # When you save with encryption, it will apply the new encryption.
+        pdf = pikepdf.Pdf.open(file.stream)
 
         output = io.BytesIO()
-        writer.write(output)
+        
+        # Define encryption settings (Owner password is same as user password for simplicity)
+        # R=6 is for AES-256 encryption, which is modern and strong.
+        encryption = pikepdf.Encryption(
+            user=password,
+            owner=password,
+            R=6 # Revision 6 for AES-256
+        )
+        
+        pdf.save(output, encryption=encryption)
         output.seek(0)
 
         logging.info(f"Lock PDF: Successfully locked and sent '{file.filename}'.")
@@ -125,15 +136,15 @@ def lock_pdf():
             as_attachment=True,
             download_name=f"locked_{file.filename}"
         )
-    except errors.PdfReadError as e:
-        logging.error(f"Error reading PDF file '{file.filename}' for locking: {e}")
-        return jsonify({"error": f"Failed to read PDF: {str(e)}. It might be corrupted or malformed."}), 400
+    except pikepdf.PdfError as e:
+        logging.error(f"Lock PDF: pikepdf error during lock for '{file.filename}': {e}")
+        return jsonify({"error": f"Failed to lock PDF: Invalid PDF structure or internal error: {str(e)}"}), 400
     except Exception as e:
         logging.error(f"Error locking PDF '{file.filename}': {e}", exc_info=True)
         return jsonify({"error": f"Failed to lock PDF: An unexpected server error occurred: {str(e)}"}), 500
 
 
-# PDF LINK REMOVER ENDPOINT (unchanged, but included for completeness)
+# PDF LINK REMOVER ENDPOINT (modified to use pikepdf)
 @app.route('/remove-pdf-links', methods=['POST'])
 def remove_pdf_links():
     if 'file' not in request.files:
@@ -150,33 +161,36 @@ def remove_pdf_links():
         return jsonify({"error": "Invalid file type. Only PDF files are accepted."}), 400
 
     try:
-        reader = PdfReader(file.stream)
+        pdf = pikepdf.Pdf.open(file.stream)
 
-        if reader.is_encrypted:
+        if pdf.is_encrypted:
             logging.warning(f"Remove Links: Attempt to remove links from encrypted PDF '{file.filename}'.")
             return jsonify({"error": "Failed to remove links: PDF is encrypted. Unlock it first."}), 400
 
-        writer = PdfWriter()
-
-        for page_num in range(len(reader.pages)):
-            page = reader.pages[page_num]
-
+        # Iterate through pages and remove link annotations
+        # pikepdf handles this differently than PyPDF2
+        for page in pdf.pages:
+            # Get the /Annots array. If it doesn't exist, create an empty one.
             if '/Annots' in page:
-                new_annots = []
-                for annot in page['/Annots']:
-                    annot_obj = annot.get_object()
-                    if annot_obj.get('/Subtype') != '/Link':
+                new_annots = pikepdf.Array()
+                for annot in page.Annots:
+                    # Check if the annotation is a /Link (URI or GoTo action)
+                    # This check is more direct and robust with pikepdf objects
+                    if annot.A and annot.A.Type == '/Action' and (annot.A.S == '/URI' or annot.A.S == '/GoTo'):
+                        logging.info(f"Removed a link annotation from page.")
+                    elif annot.Subtype == '/Link': # Another check for direct Link annotation
+                        logging.info(f"Removed a link annotation (Subtype /Link) from page.")
+                    else:
                         new_annots.append(annot)
-
-                if new_annots:
-                    page['/Annots'] = new_annots
+                
+                # Replace the /Annots array if there are remaining annotations
+                if len(new_annots) > 0:
+                    page.Annots = new_annots
                 else:
-                    del page['/Annots']
-
-            writer.add_page(page)
+                    del page.Annots # Remove /Annots key if no annotations remain
 
         output_pdf = io.BytesIO()
-        writer.write(output_pdf)
+        pdf.save(output_pdf) # Save the modified PDF
         output_pdf.seek(0)
 
         logging.info(f"Remove Links: Successfully removed links from and sent '{file.filename}'.")
@@ -187,7 +201,7 @@ def remove_pdf_links():
             download_name=f"links_removed_{file.filename}"
         )
 
-    except errors.PdfReadError as e:
+    except pikepdf.PdfError as e:
         logging.error(f"Error reading PDF file '{file.filename}' for link removal: {e}")
         return jsonify({"error": f"Failed to read PDF for link removal: {str(e)}. It might be corrupted or malformed."}), 400
     except Exception as e:
