@@ -1,6 +1,5 @@
 from flask import Flask, request, send_file, jsonify
-# from PyPDF2 import PdfReader, PdfWriter, errors # REMOVED PyPDF2
-import pikepdf # ADDED pikepdf
+import pikepdf # Use pikepdf for PDF operations
 from flask_cors import CORS
 import io
 import logging
@@ -10,7 +9,7 @@ app = Flask(__name__)
 CORS(app)  # Enable CORS for cross-origin requests
 
 # Configure logging
-logging.basicConfig(level=logging.INFO) # Keep INFO for production, DEBUG for dev
+logging.basicConfig(level=logging.INFO) # Set to INFO for production, DEBUG for development
 
 # Root route for health check or info
 @app.route('/')
@@ -40,39 +39,32 @@ def unlock_pdf():
         return jsonify({"error": "Invalid file type. Only PDF files are accepted."}), 400
 
     try:
-        # pikepdf.open can take a file-like object or a path
-        # It raises various exceptions on errors
+        pdf = None
+        file.stream.seek(0) # Ensure stream is at the beginning
+
+        # Attempt to open the PDF. pikepdf.Pdf.open handles decryption directly.
+        # It will raise an error if the password is incorrect or PDF is malformed.
         try:
-            # Try to open without a password first to check if it's encrypted
-            pdf = pikepdf.Pdf.open(file.stream)
-            # If successful, it means it was not encrypted, or it was opened without needing a password.
-            # In unlock context, if it was encrypted and we opened it without password, it means incorrect password.
-            # However, if it opened without error and we are in unlock mode, it means it wasn't encrypted.
+            pdf = pikepdf.Pdf.open(file.stream, password=password)
             if not pdf.is_encrypted:
+                # If it opens without error *and* reports not encrypted, it means it was never locked
                 logging.info(f"Unlock PDF: File '{file.filename}' is not encrypted. Cannot unlock.")
                 return jsonify({"error": "This PDF is not encrypted. Cannot unlock."}), 400
-            # If it reached here, it means it *was* encrypted but opened without a password,
-            # indicating a potential logic error or that PyPDF2 encrypted it weakly.
-            # However, pikepdf.Pdf.open should raise an error if it's password-protected.
-            # Let's re-open with the password.
-            file.stream.seek(0) # Reset stream position for re-opening
-            pdf = pikepdf.Pdf.open(file.stream, password=password)
-
 
         except pikepdf.PasswordError:
             logging.warning(f"Unlock PDF: Incorrect password for '{file.filename}'.")
             return jsonify({"error": "Incorrect password for this PDF."}), 400
-        except pikepdf.PdfError as e: # Catch other pikepdf specific errors (e.g., malformed PDF)
+        except pikepdf.PdfError as e: # Catches various PDF-related errors from pikepdf
             logging.error(f"Unlock PDF: pikepdf error during open/decrypt for '{file.filename}': {e}")
             return jsonify({"error": f"Failed to unlock PDF: Invalid PDF file or corrupted encryption: {str(e)}"}), 400
         except Exception as e:
+            # Catch any other unexpected exceptions during the open attempt
             logging.error(f"Unlock PDF: Unexpected error during pikepdf open/decrypt for '{file.filename}': {e}", exc_info=True)
             return jsonify({"error": f"Failed to unlock PDF: An unexpected error occurred: {str(e)}"}), 500
 
         # If we reach here, the PDF was successfully opened and implicitly decrypted by pikepdf.open
-        # We now just need to save it without encryption.
         output = io.BytesIO()
-        pdf.save(output) # Saves without encryption if opened successfully decrypted
+        pdf.save(output) # Saves the decrypted PDF without encryption
         output.seek(0)
 
         logging.info(f"Unlock PDF: Successfully unlocked and sent '{file.filename}'.")
@@ -84,6 +76,7 @@ def unlock_pdf():
         )
 
     except Exception as e:
+        # General catch-all for any errors not caught by more specific pikepdf errors
         logging.error(f"General error in unlock_pdf for '{file.filename}': {e}", exc_info=True)
         return jsonify({"error": f"Failed to unlock PDF: An unexpected server error occurred: {str(e)}"}), 500
 
@@ -110,20 +103,16 @@ def lock_pdf():
         return jsonify({"error": "Invalid file type. Only PDF files are accepted."}), 400
 
     try:
-        # Open the PDF using pikepdf
-        # If it's already encrypted and you don't provide a password,
-        # pikepdf might still open it but with limited access.
-        # When you save with encryption, it will apply the new encryption.
+        file.stream.seek(0) # Ensure stream is at the beginning
         pdf = pikepdf.Pdf.open(file.stream)
 
         output = io.BytesIO()
         
-        # Define encryption settings (Owner password is same as user password for simplicity)
-        # R=6 is for AES-256 encryption, which is modern and strong.
+        # Define modern AES-256 encryption settings
         encryption = pikepdf.Encryption(
             user=password,
-            owner=password,
-            R=6 # Revision 6 for AES-256
+            owner=password, # Owner password often same as user for simplicity in tools
+            R=6 # Revision 6 for AES-256 encryption
         )
         
         pdf.save(output, encryption=encryption)
@@ -144,7 +133,7 @@ def lock_pdf():
         return jsonify({"error": f"Failed to lock PDF: An unexpected server error occurred: {str(e)}"}), 500
 
 
-# PDF LINK REMOVER ENDPOINT (modified to use pikepdf)
+# PDF LINK REMOVER ENDPOINT (updated for pikepdf)
 @app.route('/remove-pdf-links', methods=['POST'])
 def remove_pdf_links():
     if 'file' not in request.files:
@@ -161,33 +150,34 @@ def remove_pdf_links():
         return jsonify({"error": "Invalid file type. Only PDF files are accepted."}), 400
 
     try:
+        file.stream.seek(0) # Ensure stream is at the beginning
         pdf = pikepdf.Pdf.open(file.stream)
 
         if pdf.is_encrypted:
             logging.warning(f"Remove Links: Attempt to remove links from encrypted PDF '{file.filename}'.")
             return jsonify({"error": "Failed to remove links: PDF is encrypted. Unlock it first."}), 400
 
-        # Iterate through pages and remove link annotations
-        # pikepdf handles this differently than PyPDF2
         for page in pdf.pages:
-            # Get the /Annots array. If it doesn't exist, create an empty one.
-            if '/Annots' in page:
+            # Check if '/Annots' exists and is an Array
+            if '/Annots' in page and isinstance(page.Annots, pikepdf.Array):
                 new_annots = pikepdf.Array()
                 for annot in page.Annots:
-                    # Check if the annotation is a /Link (URI or GoTo action)
-                    # This check is more direct and robust with pikepdf objects
-                    if annot.A and annot.A.Type == '/Action' and (annot.A.S == '/URI' or annot.A.S == '/GoTo'):
-                        logging.info(f"Removed a link annotation from page.")
-                    elif annot.Subtype == '/Link': # Another check for direct Link annotation
-                        logging.info(f"Removed a link annotation (Subtype /Link) from page.")
-                    else:
+                    # Keep annotations that are NOT links
+                    # A link typically has /Subtype /Link or an Action (A) of type /URI or /GoTo
+                    is_link = False
+                    if annot.get('/Subtype') == '/Link':
+                        is_link = True
+                    elif annot.get('/A') and annot.A.get('/S') in ('/URI', '/GoTo'):
+                        is_link = True
+                    
+                    if not is_link:
                         new_annots.append(annot)
                 
-                # Replace the /Annots array if there are remaining annotations
+                # Replace the /Annots array or delete it if empty
                 if len(new_annots) > 0:
                     page.Annots = new_annots
                 else:
-                    del page.Annots # Remove /Annots key if no annotations remain
+                    del page.Annots # Remove the key if no annotations remain
 
         output_pdf = io.BytesIO()
         pdf.save(output_pdf) # Save the modified PDF
