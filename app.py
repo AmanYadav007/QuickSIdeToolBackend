@@ -3,6 +3,11 @@ import pikepdf # Use pikepdf for PDF operations
 from flask_cors import CORS
 import io
 import logging
+import os
+from docx import Document
+from docx.shared import Inches, Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+import fitz  # PyMuPDF for better text extraction
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -10,6 +15,8 @@ CORS(app)  # Enable CORS for cross-origin requests
 
 # Configure logging
 logging.basicConfig(level=logging.INFO) # Set to INFO for production, DEBUG for development
+
+
 
 # Root route for health check or info
 @app.route('/')
@@ -198,6 +205,103 @@ def remove_pdf_links():
         logging.error(f"Error processing PDF for link removal '{file.filename}': {e}", exc_info=True)
         return jsonify({"error": f"Failed to remove links from PDF: An unexpected server error occurred: {str(e)}. It might be corrupted or complex."}), 500
 
+
+# PDF TO DOCX CONVERSION ENDPOINT
+@app.route('/pdf-to-docx', methods=['POST'])
+def pdf_to_docx():
+    if 'file' not in request.files:
+        logging.error("PDF to DOCX: No file part in the request.")
+        return jsonify({"error": "No file part in the request."}), 400
+
+    file = request.files['file']
+
+    if file.filename == '':
+        logging.error("PDF to DOCX: No selected file.")
+        return jsonify({"error": "No selected file."}), 400
+    if not file.filename.lower().endswith('.pdf'):
+        logging.error(f"PDF to DOCX: Invalid file type uploaded: {file.filename}")
+        return jsonify({"error": "Invalid file type. Only PDF files are accepted."}), 400
+
+    try:
+        file.stream.seek(0)
+        
+        # Open PDF with PyMuPDF for better text extraction
+        pdf_document = fitz.open(stream=file.stream, filetype="pdf")
+        
+        # Create a new Word document
+        doc = Document()
+        
+        # Set document margins
+        sections = doc.sections
+        for section in sections:
+            section.top_margin = Inches(1)
+            section.bottom_margin = Inches(1)
+            section.left_margin = Inches(1)
+            section.right_margin = Inches(1)
+        
+        # Process each page
+        for page_num in range(len(pdf_document)):
+            page = pdf_document[page_num]
+            
+            # Extract text blocks with positioning information
+            text_blocks = page.get_text("dict")
+            
+            # Add page break if not first page
+            if page_num > 0:
+                doc.add_page_break()
+            
+            # Process text blocks
+            if "blocks" in text_blocks:
+                for block in text_blocks["blocks"]:
+                    if "lines" in block:
+                        for line in block["lines"]:
+                            if "spans" in line:
+                                # Create a paragraph for each line
+                                paragraph = doc.add_paragraph()
+                                
+                                for span in line["spans"]:
+                                    if "text" in span and span["text"].strip():
+                                        # Get font information
+                                        font_size = span.get("size", 12)
+                                        font_name = span.get("font", "Arial")
+                                        is_bold = "bold" in font_name.lower() or font_size > 14
+                                        
+                                        # Add text run with formatting
+                                        run = paragraph.add_run(span["text"])
+                                        run.font.name = font_name
+                                        run.font.size = Pt(font_size)
+                                        run.bold = is_bold
+                                
+                                # Add spacing after paragraph
+                                paragraph.space_after = Pt(6)
+        
+        # Close the PDF document
+        pdf_document.close()
+        
+        # Save the Word document to a bytes buffer
+        docx_buffer = io.BytesIO()
+        doc.save(docx_buffer)
+        docx_buffer.seek(0)
+        
+        # Generate output filename
+        output_filename = file.filename.replace('.pdf', '.docx')
+        if not output_filename.endswith('.docx'):
+            output_filename += '.docx'
+        
+        logging.info(f"PDF to DOCX: Successfully converted '{file.filename}' to DOCX.")
+        return send_file(
+            docx_buffer,
+            mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            as_attachment=True,
+            download_name=output_filename
+        )
+
+    except fitz.FileDataError as e:
+        logging.error(f"PDF to DOCX: Invalid or corrupted PDF file '{file.filename}': {e}")
+        return jsonify({"error": f"Invalid PDF file: {str(e)}"}), 400
+    except Exception as e:
+        logging.error(f"PDF to DOCX: Error converting '{file.filename}': {e}", exc_info=True)
+        return jsonify({"error": f"Failed to convert PDF to DOCX: {str(e)}"}), 500
 
 # Main entry point
 if __name__ == '__main__':
