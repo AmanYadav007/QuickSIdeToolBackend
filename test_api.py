@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test script for QuickSideTool File Converter API
+Test script for QuickSideTool PDF Security API
 """
 
 import requests
@@ -64,28 +64,83 @@ def create_test_pdf():
         temp_file.close()
         return temp_file.name
 
-def test_pdf_to_txt():
-    """Test PDF to text conversion"""
-    print("\n🔍 Testing PDF to text conversion...")
+def test_pdf_unlock():
+    """Test PDF unlock functionality"""
+    print("\n🔍 Testing PDF unlock...")
     
     pdf_path = create_test_pdf()
     if not pdf_path:
-        print("⚠️  Skipping PDF to text test")
+        print("⚠️  Skipping PDF unlock test")
         return
     
     try:
         with open(pdf_path, 'rb') as f:
             files = {'file': ('test.pdf', f, 'application/pdf')}
-            response = requests.post(f"{BASE_URL}/convert/pdf-to-txt", files=files)
+            data = {'password': 'test123'}
+            response = requests.post(f"{BASE_URL}/unlock-pdf", files=files, data=data)
+        
+        if response.status_code == 400 and "not encrypted" in response.text:
+            print("✅ PDF unlock test passed (correctly detected unencrypted PDF)")
+        else:
+            print(f"❌ PDF unlock test failed: {response.status_code}")
+            print(f"   Response: {response.text}")
+    except Exception as e:
+        print(f"❌ PDF unlock test error: {e}")
+    finally:
+        # Cleanup
+        if os.path.exists(pdf_path):
+            os.unlink(pdf_path)
+
+def test_pdf_lock():
+    """Test PDF lock functionality"""
+    print("\n🔍 Testing PDF lock...")
+    
+    pdf_path = create_test_pdf()
+    if not pdf_path:
+        print("⚠️  Skipping PDF lock test")
+        return
+    
+    try:
+        with open(pdf_path, 'rb') as f:
+            files = {'file': ('test.pdf', f, 'application/pdf')}
+            data = {'password': 'test123'}
+            response = requests.post(f"{BASE_URL}/lock-pdf", files=files, data=data)
         
         if response.status_code == 200:
-            print("✅ PDF to text conversion passed")
+            print("✅ PDF lock test passed")
             print(f"   Response size: {len(response.content)} bytes")
         else:
-            print(f"❌ PDF to text conversion failed: {response.status_code}")
-            print(f"   Error: {response.text}")
+            print(f"❌ PDF lock test failed: {response.status_code}")
+            print(f"   Response: {response.text}")
     except Exception as e:
-        print(f"❌ PDF to text conversion error: {e}")
+        print(f"❌ PDF lock test error: {e}")
+    finally:
+        # Cleanup
+        if os.path.exists(pdf_path):
+            os.unlink(pdf_path)
+
+def test_remove_pdf_links():
+    """Test PDF link removal functionality"""
+    print("\n🔍 Testing PDF link removal...")
+    
+    pdf_path = create_test_pdf()
+    if not pdf_path:
+        print("⚠️  Skipping PDF link removal test")
+        return
+    
+    try:
+        with open(pdf_path, 'rb') as f:
+            files = {'file': ('test.pdf', f, 'application/pdf')}
+            response = requests.post(f"{BASE_URL}/remove-pdf-links", files=files)
+        
+        if response.status_code == 200:
+            print("✅ PDF link removal test passed")
+            print(f"   Response size: {len(response.content)} bytes")
+        else:
+            print(f"❌ PDF link removal test failed: {response.status_code}")
+            print(f"   Response: {response.text}")
+    except Exception as e:
+        print(f"❌ PDF link removal test error: {e}")
     finally:
         # Cleanup
         if os.path.exists(pdf_path):
@@ -103,53 +158,51 @@ def test_invalid_file():
         
         with open(temp_file.name, 'rb') as f:
             files = {'file': ('test.txt', f, 'text/plain')}
-            response = requests.post(f"{BASE_URL}/convert/pdf-to-txt", files=files)
+            data = {'password': 'test123'}
+            response = requests.post(f"{BASE_URL}/unlock-pdf", files=files, data=data)
         
         if response.status_code == 400:
-            print("✅ Invalid file handling passed")
-            print(f"   Error message: {response.json()}")
+            print("✅ Invalid file handling test passed")
         else:
-            print(f"❌ Invalid file handling failed: {response.status_code}")
+            print(f"❌ Invalid file handling test failed: {response.status_code}")
+            print(f"   Response: {response.text}")
     except Exception as e:
-        print(f"❌ Invalid file handling error: {e}")
+        print(f"❌ Invalid file handling test error: {e}")
     finally:
         # Cleanup
         if os.path.exists(temp_file.name):
             os.unlink(temp_file.name)
 
 def test_missing_file():
-    """Test handling of missing file parameter"""
-    print("\n🔍 Testing missing file parameter...")
+    """Test handling of missing files"""
+    print("\n🔍 Testing missing file handling...")
     
     try:
-        response = requests.post(f"{BASE_URL}/convert/pdf-to-txt")
+        response = requests.post(f"{BASE_URL}/unlock-pdf")
         
         if response.status_code == 422:  # FastAPI validation error
-            print("✅ Missing file parameter handling passed")
-            print(f"   Error: {response.json()}")
+            print("✅ Missing file handling test passed")
         else:
-            print(f"❌ Missing file parameter handling failed: {response.status_code}")
+            print(f"❌ Missing file handling test failed: {response.status_code}")
+            print(f"   Response: {response.text}")
     except Exception as e:
-        print(f"❌ Missing file parameter handling error: {e}")
+        print(f"❌ Missing file handling test error: {e}")
 
 def main():
     """Run all tests"""
-    print("🚀 Starting QuickSideTool API Tests")
+    print("🚀 Starting QuickSideTool PDF Security API Tests")
     print("=" * 50)
     
-    # Test basic endpoints
     test_health_check()
     test_root_endpoint()
-    
-    # Test conversion endpoints
-    test_pdf_to_txt()
-    
-    # Test error handling
+    test_pdf_unlock()
+    test_pdf_lock()
+    test_remove_pdf_links()
     test_invalid_file()
     test_missing_file()
     
     print("\n" + "=" * 50)
-    print("🏁 API testing completed")
+    print("✅ All tests completed!")
 
 if __name__ == "__main__":
     main() 
