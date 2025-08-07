@@ -19,6 +19,9 @@ import pikepdf
 import fitz  # PyMuPDF
 from PIL import Image
 
+# Import Adobe service
+from adobe_service import adobe_service
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -26,7 +29,7 @@ logger = logging.getLogger(__name__)
 # Initialize FastAPI app
 app = FastAPI(
     title="QuickSideTool PDF Security API",
-    description="Professional PDF security and manipulation service",
+    description="Professional PDF security and manipulation service with Adobe integration",
     version="2.0.0"
 )
 
@@ -107,6 +110,11 @@ async def root():
             "unlock_pdf": "/unlock-pdf",
             "lock_pdf": "/lock-pdf", 
             "remove_pdf_links": "/remove-pdf-links",
+            "adobe_pdf_to_word": "/adobe/convert/pdf-to-word",
+            "adobe_pdf_to_excel": "/adobe/convert/pdf-to-excel",
+            "adobe_compress_pdf": "/adobe/compress-pdf",
+            "adobe_optimize_pdf": "/adobe/optimize-pdf",
+            "adobe_extract_text": "/adobe/extract-text",
             "health": "/health"
         }
     }
@@ -280,6 +288,279 @@ async def remove_pdf_links_legacy(file: UploadFile = File(...)):
     except Exception as e:
         logger.error(f"Error removing PDF links: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to remove links: {str(e)}")
+    
+    finally:
+        # Cleanup temporary files
+        for path in [input_path, output_path]:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except:
+                    pass
+
+# Adobe Enhanced Endpoints
+
+@app.post("/adobe/convert/pdf-to-word")
+async def adobe_convert_pdf_to_word(file: UploadFile = File(...)):
+    """Convert PDF to Word document using Adobe PDF Services (Professional quality)"""
+    if not validate_pdf_file(file):
+        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
+    
+    if not validate_file_size(file.size):
+        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
+    
+    try:
+        # Create temporary files
+        input_path = create_temp_file('.pdf')
+        output_path = create_temp_file('.docx')
+        
+        # Save uploaded file
+        with open(input_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # Use Adobe service for conversion
+        success = await adobe_service.convert_pdf_to_word(input_path, output_path)
+        
+        if success:
+            # Generate output filename
+            output_filename = file.filename.replace('.pdf', '.docx')
+            if not output_filename.endswith('.docx'):
+                output_filename += '.docx'
+            
+            logger.info(f"Successfully converted {file.filename} to Word using Adobe")
+            
+            # Return the converted file
+            return FileResponse(
+                path=output_path,
+                filename=output_filename,
+                media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+            )
+        else:
+            raise HTTPException(status_code=500, detail="Adobe conversion failed. Please try again.")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error converting PDF to Word with Adobe: {e}")
+        raise HTTPException(status_code=500, detail=f"Conversion failed: {str(e)}")
+    
+    finally:
+        # Cleanup temporary files
+        for path in [input_path, output_path]:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except:
+                    pass
+
+@app.post("/adobe/convert/pdf-to-excel")
+async def adobe_convert_pdf_to_excel(file: UploadFile = File(...)):
+    """Convert PDF to Excel using Adobe PDF Services (Professional quality)"""
+    if not validate_pdf_file(file):
+        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
+    
+    if not validate_file_size(file.size):
+        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
+    
+    try:
+        # Create temporary files
+        input_path = create_temp_file('.pdf')
+        output_path = create_temp_file('.xlsx')
+        
+        # Save uploaded file
+        with open(input_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # Use Adobe service for conversion
+        success = await adobe_service.convert_pdf_to_excel(input_path, output_path)
+        
+        if success:
+            # Generate output filename
+            output_filename = file.filename.replace('.pdf', '.xlsx')
+            if not output_filename.endswith('.xlsx'):
+                output_filename += '.xlsx'
+            
+            logger.info(f"Successfully converted {file.filename} to Excel using Adobe")
+            
+            # Return the converted file
+            return FileResponse(
+                path=output_path,
+                filename=output_filename,
+                media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+        else:
+            raise HTTPException(status_code=500, detail="Adobe conversion failed. Please try again.")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error converting PDF to Excel with Adobe: {e}")
+        raise HTTPException(status_code=500, detail=f"Conversion failed: {str(e)}")
+    
+    finally:
+        # Cleanup temporary files
+        for path in [input_path, output_path]:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except:
+                    pass
+
+@app.post("/adobe/compress-pdf")
+async def adobe_compress_pdf(
+    file: UploadFile = File(...),
+    compression_level: str = Form("medium")
+):
+    """Compress PDF using Adobe PDF Services (Professional quality)"""
+    if not validate_pdf_file(file):
+        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
+    
+    if not validate_file_size(file.size):
+        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
+    
+    if compression_level not in ['low', 'medium', 'high']:
+        raise HTTPException(status_code=400, detail="Invalid compression level. Use: low, medium, or high.")
+    
+    try:
+        # Create temporary files
+        input_path = create_temp_file('.pdf')
+        output_path = create_temp_file('.pdf')
+        
+        # Save uploaded file
+        with open(input_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # Use Adobe service for compression
+        success = await adobe_service.compress_pdf(input_path, output_path, compression_level)
+        
+        if success:
+            # Generate output filename
+            output_filename = f"compressed_{file.filename}"
+            
+            logger.info(f"Successfully compressed {file.filename} using Adobe")
+            
+            # Return the compressed file
+            return FileResponse(
+                path=output_path,
+                filename=output_filename,
+                media_type='application/pdf'
+            )
+        else:
+            raise HTTPException(status_code=500, detail="Adobe compression failed. Please try again.")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error compressing PDF with Adobe: {e}")
+        raise HTTPException(status_code=500, detail=f"Compression failed: {str(e)}")
+    
+    finally:
+        # Cleanup temporary files
+        for path in [input_path, output_path]:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except:
+                    pass
+
+@app.post("/adobe/optimize-pdf")
+async def adobe_optimize_pdf(file: UploadFile = File(...)):
+    """Optimize PDF for web viewing using Adobe PDF Services"""
+    if not validate_pdf_file(file):
+        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
+    
+    if not validate_file_size(file.size):
+        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
+    
+    try:
+        # Create temporary files
+        input_path = create_temp_file('.pdf')
+        output_path = create_temp_file('.pdf')
+        
+        # Save uploaded file
+        with open(input_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # Use Adobe service for optimization
+        success = await adobe_service.optimize_pdf_for_web(input_path, output_path)
+        
+        if success:
+            # Generate output filename
+            output_filename = f"optimized_{file.filename}"
+            
+            logger.info(f"Successfully optimized {file.filename} using Adobe")
+            
+            # Return the optimized file
+            return FileResponse(
+                path=output_path,
+                filename=output_filename,
+                media_type='application/pdf'
+            )
+        else:
+            raise HTTPException(status_code=500, detail="Adobe optimization failed. Please try again.")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error optimizing PDF with Adobe: {e}")
+        raise HTTPException(status_code=500, detail=f"Optimization failed: {str(e)}")
+    
+    finally:
+        # Cleanup temporary files
+        for path in [input_path, output_path]:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except:
+                    pass
+
+@app.post("/adobe/extract-text")
+async def adobe_extract_text(file: UploadFile = File(...)):
+    """Extract text from PDF using OCR with Adobe Document Services"""
+    if not validate_pdf_file(file):
+        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
+    
+    if not validate_file_size(file.size):
+        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
+    
+    try:
+        # Create temporary file
+        input_path = create_temp_file('.pdf')
+        
+        # Save uploaded file
+        with open(input_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # Use Adobe service for text extraction
+        extracted_text = await adobe_service.extract_text_with_ocr(input_path)
+        
+        if extracted_text:
+            # Generate output filename
+            output_filename = file.filename.replace('.pdf', '.txt')
+            if not output_filename.endswith('.txt'):
+                output_filename += '.txt'
+            
+            # Create temporary text file
+            output_path = create_temp_file('.txt')
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(extracted_text)
+            
+            logger.info(f"Successfully extracted text from {file.filename} using Adobe OCR")
+            
+            # Return the text file
+            return FileResponse(
+                path=output_path,
+                filename=output_filename,
+                media_type='text/plain'
+            )
+        else:
+            raise HTTPException(status_code=500, detail="Adobe text extraction failed. Please try again.")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error extracting text with Adobe: {e}")
+        raise HTTPException(status_code=500, detail=f"Text extraction failed: {str(e)}")
     
     finally:
         # Cleanup temporary files
