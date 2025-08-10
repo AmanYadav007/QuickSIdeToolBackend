@@ -1,7 +1,6 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 import uvicorn
 import tempfile
 import os
@@ -11,13 +10,12 @@ import logging
 from typing import List, Optional
 import asyncio
 from datetime import datetime, timedelta
-import zipfile
-import io
+ 
 
 # Import conversion libraries
 import pikepdf
 import fitz  # PyMuPDF
-from PIL import Image
+ 
 
 # Import Adobe service
 from adobe_service import adobe_service
@@ -71,13 +69,34 @@ async def startup_event():
     asyncio.create_task(cleanup_temp_files())
 
 # Utility functions
-def validate_file_size(file_size: int) -> bool:
-    """Validate file size"""
-    return file_size <= MAX_FILE_SIZE
+def get_upload_file_size(upload_file: UploadFile) -> int:
+    """Safely determine the size of an UploadFile without consuming it"""
+    try:
+        current_position = upload_file.file.tell()
+    except Exception:
+        current_position = 0
+    try:
+        upload_file.file.seek(0, os.SEEK_END)
+        size = upload_file.file.tell()
+    finally:
+        try:
+            upload_file.file.seek(current_position, os.SEEK_SET)
+        except Exception:
+            # Best effort reset
+            try:
+                upload_file.file.seek(0)
+            except Exception:
+                pass
+    return size
 
-def get_file_extension(filename: str) -> str:
-    """Get file extension from filename"""
-    return os.path.splitext(filename)[1].lower()
+def validate_file_size_upload(upload_file: UploadFile) -> bool:
+    """Validate file size for an UploadFile instance"""
+    try:
+        return get_upload_file_size(upload_file) <= MAX_FILE_SIZE
+    except Exception:
+        return False
+
+ 
 
 def create_temp_file(extension: str = "") -> str:
     """Create a temporary file path"""
@@ -90,15 +109,7 @@ def validate_pdf_file(file: UploadFile) -> bool:
         return False
     return True
 
-def validate_image_file(file: UploadFile) -> bool:
-    """Validate image file"""
-    allowed_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']
-    return get_file_extension(file.filename) in allowed_extensions
-
-def validate_word_file(file: UploadFile) -> bool:
-    """Validate Word file"""
-    allowed_extensions = ['.docx', '.doc']
-    return get_file_extension(file.filename) in allowed_extensions
+ 
 
 # Root endpoint
 @app.get("/")
@@ -113,8 +124,6 @@ async def root():
             "adobe_pdf_to_word": "/adobe/convert/pdf-to-word",
             "adobe_pdf_to_excel": "/adobe/convert/pdf-to-excel",
             "adobe_compress_pdf": "/adobe/compress-pdf",
-            "adobe_optimize_pdf": "/adobe/optimize-pdf",
-            "adobe_extract_text": "/adobe/extract-text",
             "health": "/health"
         }
     }
@@ -131,7 +140,7 @@ async def unlock_pdf_legacy(file: UploadFile = File(...), password: str = Form(.
     if not validate_pdf_file(file):
         raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
     
-    if not validate_file_size(file.size):
+    if not validate_file_size_upload(file):
         raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
     
     try:
@@ -186,7 +195,7 @@ async def lock_pdf_legacy(file: UploadFile = File(...), password: str = Form(...
     if not validate_pdf_file(file):
         raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
     
-    if not validate_file_size(file.size):
+    if not validate_file_size_upload(file):
         raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
     
     try:
@@ -244,7 +253,7 @@ async def remove_pdf_links_legacy(file: UploadFile = File(...)):
     if not validate_pdf_file(file):
         raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
     
-    if not validate_file_size(file.size):
+    if not validate_file_size_upload(file):
         raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
     
     try:
@@ -298,6 +307,92 @@ async def remove_pdf_links_legacy(file: UploadFile = File(...)):
                 except:
                     pass
 
+# Basic Endpoints
+
+@app.post("/compress-pdf")
+async def compress_pdf(file: UploadFile = File(...)):
+    """Compress PDF using PyMuPDF"""
+    if not validate_pdf_file(file):
+        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
+
+    if not validate_file_size_upload(file):
+        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
+
+    input_path = create_temp_file('.pdf')
+    output_path = create_temp_file('.pdf')
+
+    try:
+        with open(input_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        doc = fitz.open(input_path)
+        # Save with garbage collection, deflation, and cleaning
+        doc.save(output_path, garbage=4, deflate=True, clean=True)
+        doc.close()
+
+        output_filename = f"compressed_{file.filename}"
+        logger.info(f"Successfully compressed {file.filename} using basic compression")
+
+        return FileResponse(
+            path=output_path,
+            filename=output_filename,
+            media_type='application/pdf'
+        )
+    except Exception as e:
+        logger.error(f"Error compressing PDF: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to compress PDF: {str(e)}")
+    finally:
+        for path in [input_path, output_path]:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except:
+                    pass
+
+@app.post("/convert/pdf-to-word")
+async def convert_pdf_to_word(file: UploadFile = File(...)):
+    """Convert PDF to Word document using pdf2docx"""
+    if not validate_pdf_file(file):
+        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
+
+    if not validate_file_size_upload(file):
+        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
+
+    input_path = create_temp_file('.pdf')
+    output_path = create_temp_file('.docx')
+
+    try:
+        with open(input_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        # Convert PDF to Word
+        from pdf2docx import Converter
+        cv = Converter(input_path)
+        cv.convert(output_path, start=0, end=None)
+        cv.close()
+
+        output_filename = file.filename.replace('.pdf', '.docx')
+        if not output_filename.endswith('.docx'):
+            output_filename += '.docx'
+        
+        logger.info(f"Successfully converted {file.filename} to Word using basic conversion")
+
+        return FileResponse(
+            path=output_path,
+            filename=output_filename,
+            media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        )
+    except Exception as e:
+        logger.error(f"Error converting PDF to Word: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to convert PDF to Word: {str(e)}")
+    finally:
+        for path in [input_path, output_path]:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except:
+                    pass
+
 # Adobe Enhanced Endpoints
 
 @app.post("/adobe/convert/pdf-to-word")
@@ -306,7 +401,7 @@ async def adobe_convert_pdf_to_word(file: UploadFile = File(...)):
     if not validate_pdf_file(file):
         raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
     
-    if not validate_file_size(file.size):
+    if not validate_file_size_upload(file):
         raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
     
     try:
@@ -359,7 +454,7 @@ async def adobe_convert_pdf_to_excel(file: UploadFile = File(...)):
     if not validate_pdf_file(file):
         raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
     
-    if not validate_file_size(file.size):
+    if not validate_file_size_upload(file):
         raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
     
     try:
@@ -415,7 +510,7 @@ async def adobe_compress_pdf(
     if not validate_pdf_file(file):
         raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
     
-    if not validate_file_size(file.size):
+    if not validate_file_size_upload(file):
         raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
     
     if compression_level not in ['low', 'medium', 'high']:
@@ -463,113 +558,7 @@ async def adobe_compress_pdf(
                 except:
                     pass
 
-@app.post("/adobe/optimize-pdf")
-async def adobe_optimize_pdf(file: UploadFile = File(...)):
-    """Optimize PDF for web viewing using Adobe PDF Services"""
-    if not validate_pdf_file(file):
-        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
-    
-    if not validate_file_size(file.size):
-        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
-    
-    try:
-        # Create temporary files
-        input_path = create_temp_file('.pdf')
-        output_path = create_temp_file('.pdf')
-        
-        # Save uploaded file
-        with open(input_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        # Use Adobe service for optimization
-        success = await adobe_service.optimize_pdf_for_web(input_path, output_path)
-        
-        if success:
-            # Generate output filename
-            output_filename = f"optimized_{file.filename}"
-            
-            logger.info(f"Successfully optimized {file.filename} using Adobe")
-            
-            # Return the optimized file
-            return FileResponse(
-                path=output_path,
-                filename=output_filename,
-                media_type='application/pdf'
-            )
-        else:
-            raise HTTPException(status_code=500, detail="Adobe optimization failed. Please try again.")
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error optimizing PDF with Adobe: {e}")
-        raise HTTPException(status_code=500, detail=f"Optimization failed: {str(e)}")
-    
-    finally:
-        # Cleanup temporary files
-        for path in [input_path, output_path]:
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except:
-                    pass
-
-@app.post("/adobe/extract-text")
-async def adobe_extract_text(file: UploadFile = File(...)):
-    """Extract text from PDF using OCR with Adobe Document Services"""
-    if not validate_pdf_file(file):
-        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
-    
-    if not validate_file_size(file.size):
-        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
-    
-    try:
-        # Create temporary file
-        input_path = create_temp_file('.pdf')
-        
-        # Save uploaded file
-        with open(input_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        # Use Adobe service for text extraction
-        extracted_text = await adobe_service.extract_text_with_ocr(input_path)
-        
-        if extracted_text:
-            # Generate output filename
-            output_filename = file.filename.replace('.pdf', '.txt')
-            if not output_filename.endswith('.txt'):
-                output_filename += '.txt'
-            
-            # Create temporary text file
-            output_path = create_temp_file('.txt')
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(extracted_text)
-            
-            logger.info(f"Successfully extracted text from {file.filename} using Adobe OCR")
-            
-            # Return the text file
-            return FileResponse(
-                path=output_path,
-                filename=output_filename,
-                media_type='text/plain'
-            )
-        else:
-            raise HTTPException(status_code=500, detail="Adobe text extraction failed. Please try again.")
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error extracting text with Adobe: {e}")
-        raise HTTPException(status_code=500, detail=f"Text extraction failed: {str(e)}")
-    
-    finally:
-        # Cleanup temporary files
-        for path in [input_path, output_path]:
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except:
-                    pass
+ 
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=4000)

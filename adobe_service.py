@@ -190,51 +190,6 @@ class AdobeService:
             logger.error(f"Error compressing PDF: {e}")
             return False
     
-    async def optimize_pdf_for_web(self, pdf_path: str, output_path: str) -> bool:
-        """Optimize PDF for web viewing using Adobe PDF Services"""
-        if not self.enabled:
-            return False
-            
-        try:
-            access_token = await self._get_access_token()
-            if not access_token:
-                return False
-            
-            # Create job for web optimization
-            job_id = await self._create_optimization_job(pdf_path, 'web', access_token)
-            if not job_id:
-                return False
-            
-            # Wait for job completion and download result
-            success = await self._wait_for_job_completion(job_id, output_path, access_token)
-            return success
-            
-        except Exception as e:
-            logger.error(f"Error optimizing PDF for web: {e}")
-            return False
-    
-    async def extract_text_with_ocr(self, pdf_path: str) -> Optional[str]:
-        """Extract text from PDF using OCR with Adobe Document Services"""
-        if not self.enabled:
-            return None
-            
-        try:
-            access_token = await self._get_access_token()
-            if not access_token:
-                return None
-            
-            # Create job for OCR text extraction
-            job_id = await self._create_ocr_job(pdf_path, access_token)
-            if not job_id:
-                return None
-            
-            # Wait for job completion and get result
-            result = await self._wait_for_ocr_completion(job_id, access_token)
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error extracting text with OCR: {e}")
-            return None
     
     async def _create_conversion_job(self, pdf_path: str, operation: str, access_token: str) -> Optional[str]:
         """Create a conversion job with Adobe PDF Services"""
@@ -321,90 +276,6 @@ class AdobeService:
             logger.error(f"Error creating compression job: {e}")
             return None
     
-    async def _create_optimization_job(self, pdf_path: str, optimization_type: str, access_token: str) -> Optional[str]:
-        """Create an optimization job with Adobe PDF Services"""
-        try:
-            async with aiohttp.ClientSession() as session:
-                headers = {
-                    'Authorization': f'Bearer {access_token}',
-                    'x-api-key': self.client_id
-                }
-                
-                # Upload the PDF file
-                with open(pdf_path, 'rb') as f:
-                    files = {'input': f}
-                    async with session.post(f"{self.pdf_services_url}/assets", headers=headers, data=files) as response:
-                        if response.status != 201:
-                            logger.error(f"Failed to upload PDF: {response.status}")
-                            return None
-                        
-                        upload_data = await response.json()
-                        asset_id = upload_data['assetID']
-                
-                # Create optimization job
-                job_data = {
-                    'input': {
-                        'href': f"{self.pdf_services_url}/assets/{asset_id}",
-                        'type': 'application/pdf'
-                    },
-                    'targetFormat': 'pdf',
-                    'optimizationType': optimization_type
-                }
-                
-                async with session.post(f"{self.pdf_services_url}/operation/optimize-pdf", 
-                                      headers=headers, json=job_data) as response:
-                    if response.status != 201:
-                        logger.error(f"Failed to create optimization job: {response.status}")
-                        return None
-                    
-                    job_data = await response.json()
-                    return job_data['jobID']
-                    
-        except Exception as e:
-            logger.error(f"Error creating optimization job: {e}")
-            return None
-    
-    async def _create_ocr_job(self, pdf_path: str, access_token: str) -> Optional[str]:
-        """Create an OCR job with Adobe Document Services"""
-        try:
-            async with aiohttp.ClientSession() as session:
-                headers = {
-                    'Authorization': f'Bearer {access_token}',
-                    'x-api-key': self.client_id
-                }
-                
-                # Upload the PDF file
-                with open(pdf_path, 'rb') as f:
-                    files = {'input': f}
-                    async with session.post(f"{self.document_services_url}/assets", headers=headers, data=files) as response:
-                        if response.status != 201:
-                            logger.error(f"Failed to upload PDF for OCR: {response.status}")
-                            return None
-                        
-                        upload_data = await response.json()
-                        asset_id = upload_data['assetID']
-                
-                # Create OCR job
-                job_data = {
-                    'input': {
-                        'href': f"{self.document_services_url}/assets/{asset_id}",
-                        'type': 'application/pdf'
-                    },
-                    'targetFormat': 'text'
-                }
-                
-                async with session.post(f"{self.document_services_url}/operation/extract-text", 
-                                      headers=headers, json=job_data) as response:
-                    if response.status != 201:
-                        logger.error(f"Failed to create OCR job: {response.status}")
-                        return None
-                    
-                    job_data = await response.json()
-                    return job_data['jobID']
-                    
-        except Exception as e:
-            logger.error(f"Error creating OCR job: {e}")
-            return None
     
     async def _wait_for_job_completion(self, job_id: str, output_path: str, access_token: str) -> bool:
         """Wait for job completion and download result"""
@@ -455,52 +326,7 @@ class AdobeService:
             logger.error(f"Error waiting for job completion: {e}")
             return False
     
-    async def _wait_for_ocr_completion(self, job_id: str, access_token: str) -> Optional[str]:
-        """Wait for OCR job completion and return extracted text"""
-        try:
-            async with aiohttp.ClientSession() as session:
-                headers = {
-                    'Authorization': f'Bearer {access_token}',
-                    'x-api-key': self.client_id
-                }
-                
-                # Poll for job completion
-                max_attempts = 30  # 5 minutes with 10-second intervals
-                for attempt in range(max_attempts):
-                    async with session.get(f"{self.document_services_url}/job/{job_id}", headers=headers) as response:
-                        if response.status != 200:
-                            logger.error(f"Failed to check OCR job status: {response.status}")
-                            return None
-                        
-                        job_status = await response.json()
-                        status = job_status['status']
-                        
-                        if status == 'done':
-                            # Get the extracted text
-                            result_asset_id = job_status['result']['assetID']
-                            async with session.get(f"{self.document_services_url}/assets/{result_asset_id}", 
-                                                 headers=headers) as download_response:
-                                if download_response.status == 200:
-                                    text_content = await download_response.text()
-                                    logger.info(f"OCR job {job_id} completed successfully")
-                                    return text_content
-                                else:
-                                    logger.error(f"Failed to download OCR result: {download_response.status}")
-                                    return None
-                        
-                        elif status == 'failed':
-                            logger.error(f"OCR job {job_id} failed: {job_status.get('error', 'Unknown error')}")
-                            return None
-                        
-                        # Wait before next poll
-                        await asyncio.sleep(10)
-                
-                logger.error(f"OCR job {job_id} timed out")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error waiting for OCR completion: {e}")
-            return None
+    # Removed OCR and optimization helpers since not used by current frontend
 
 # Global Adobe service instance
 adobe_service = AdobeService()
