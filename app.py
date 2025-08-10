@@ -1,802 +1,308 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.responses import FileResponse
-from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
-import tempfile
-import os
-import shutil
-import uuid
+from flask import Flask, request, send_file, jsonify
+import pikepdf # Use pikepdf for PDF operations
+from flask_cors import CORS
+import io
 import logging
-from typing import List, Optional
-import asyncio
-from datetime import datetime, timedelta
- 
+import os
+from docx import Document
+from docx.shared import Inches, Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+import fitz  # PyMuPDF for better text extraction
 
-# Import conversion libraries
-import pikepdf
-import fitz  # PyMuPDF
- 
-
-# Import Adobe service
-from adobe_service import adobe_service
+# Initialize Flask app
+app = Flask(__name__)
+CORS(app)  # Enable CORS for cross-origin requests
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO) # Set to INFO for production, DEBUG for development
 
-# Initialize FastAPI app
-app = FastAPI(
-    title="QuickSideTool PDF Security API",
-    description="Professional PDF security and manipulation service with Adobe integration",
-    version="2.0.0"
-)
 
-# Configure CORS
-ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "https://www.quicksidetool.online",
-    "https://quicksidetool.online"
-]
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["Content-Disposition"],
-)
+# Root route for health check or info
+@app.route('/')
+def home():
+    return "PDF Manipulator Backend is running!"
 
-# Configuration
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
-TEMP_DIR = tempfile.mkdtemp()
-CLEANUP_INTERVAL = 600  # 10 minutes
+# Unlock PDF endpoint
+@app.route('/unlock-pdf', methods=['POST'])
+def unlock_pdf():
+    # Check for file and password in request
+    if 'file' not in request.files:
+        logging.error("Unlock PDF: No file part in the request.")
+        return jsonify({"error": "No file part in the request."}), 400
+    if 'password' not in request.form:
+        logging.error("Unlock PDF: Password not provided.")
+        return jsonify({"error": "Password not provided."}), 400
 
-# File cleanup task
-async def cleanup_temp_files():
-    """Clean up temporary files older than 10 minutes"""
-    while True:
-        try:
-            current_time = datetime.now()
-            for filename in os.listdir(TEMP_DIR):
-                filepath = os.path.join(TEMP_DIR, filename)
-                if os.path.isfile(filepath):
-                    file_time = datetime.fromtimestamp(os.path.getctime(filepath))
-                    if current_time - file_time > timedelta(minutes=10):
-                        os.remove(filepath)
-                        logger.info(f"Cleaned up temporary file: {filename}")
-        except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
-        
-        await asyncio.sleep(CLEANUP_INTERVAL)
+    file = request.files['file']
+    password = request.form.get('password')
 
-# Start cleanup task
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(cleanup_temp_files())
-
-# Utility functions
-def get_upload_file_size(upload_file: UploadFile) -> int:
-    """Safely determine the size of an UploadFile without consuming it"""
-    try:
-        current_position = upload_file.file.tell()
-    except Exception:
-        current_position = 0
-    try:
-        upload_file.file.seek(0, os.SEEK_END)
-        size = upload_file.file.tell()
-    finally:
-        try:
-            upload_file.file.seek(current_position, os.SEEK_SET)
-        except Exception:
-            # Best effort reset
-            try:
-                upload_file.file.seek(0)
-            except Exception:
-                pass
-    return size
-
-def validate_file_size_upload(upload_file: UploadFile) -> bool:
-    """Validate file size for an UploadFile instance"""
-    try:
-        return get_upload_file_size(upload_file) <= MAX_FILE_SIZE
-    except Exception:
-        return False
-
- 
-
-def create_temp_file(extension: str = "") -> str:
-    """Create a temporary file path"""
-    unique_id = str(uuid.uuid4())
-    return os.path.join(TEMP_DIR, f"{unique_id}{extension}")
-
-def validate_pdf_file(file: UploadFile) -> bool:
-    """Validate PDF file"""
+    # Validate file presence and type
+    if file.filename == '':
+        logging.error("Unlock PDF: No selected file.")
+        return jsonify({"error": "No selected file."}), 400
     if not file.filename.lower().endswith('.pdf'):
-        return False
-    return True
+        logging.error(f"Unlock PDF: Invalid file type uploaded: {file.filename}")
+        return jsonify({"error": "Invalid file type. Only PDF files are accepted."}), 400
 
- 
-
-# Root endpoint
-@app.get("/")
-async def root():
-    return {
-        "message": "QuickSideTool PDF Security API",
-        "version": "2.0.0",
-        "endpoints": {
-            "unlock_pdf": "/unlock-pdf",
-            "lock_pdf": "/lock-pdf", 
-            "remove_pdf_links": "/remove-pdf-links",
-            "adobe_pdf_to_word": "/adobe/convert/pdf-to-word",
-            "adobe_pdf_to_excel": "/adobe/convert/pdf-to-excel",
-            "adobe_compress_pdf": "/adobe/compress-pdf",
-            "convert_pdf_to_word": "/convert/pdf-to-word",
-            "convert_pdf_to_excel": "/convert/pdf-to-excel",
-            "convert_pdf_to_text": "/convert/pdf-to-text",
-            "convert_word_to_pdf": "/convert/word-to-pdf",
-            "health": "/health"
-        }
-    }
-
-# Health check endpoint
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
-
-# PDF Unlock endpoint
-@app.post("/unlock-pdf")
-async def unlock_pdf_legacy(file: UploadFile = File(...), password: str = Form(...)):
-    """Unlock PDF with password"""
-    if not validate_pdf_file(file):
-        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
-    
-    if not validate_file_size_upload(file):
-        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
-    
     try:
-        # Create temporary file
-        input_path = create_temp_file('.pdf')
-        output_path = create_temp_file('.pdf')
-        
-        # Save uploaded file
-        with open(input_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        # Unlock PDF using pikepdf
-        with pikepdf.open(input_path, password=password) as pdf:
-            pdf.save(output_path)
-        
-        # Generate output filename
-        output_filename = f"unlocked_{file.filename}"
-        
-        logger.info(f"Successfully unlocked {file.filename}")
-        
-        # Return the unlocked file
-        return FileResponse(
-            path=output_path,
-            filename=output_filename,
-            media_type='application/pdf'
-        )
-        
-    except pikepdf.PasswordError:
-        raise HTTPException(status_code=400, detail="Incorrect password for this PDF.")
-    except pikepdf.PdfError as e:
-        if "not encrypted" in str(e).lower():
-            raise HTTPException(status_code=400, detail="This PDF is not encrypted.")
-        else:
-            raise HTTPException(status_code=400, detail=f"PDF error: {str(e)}")
-    except Exception as e:
-        logger.error(f"Error unlocking PDF: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to unlock PDF: {str(e)}")
-    
-    finally:
-        # Cleanup temporary files
-        for path in [input_path, output_path]:
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except:
-                    pass
+        pdf = None
+        file.stream.seek(0) # Ensure stream is at the beginning
 
-# PDF Lock endpoint
-@app.post("/lock-pdf")
-async def lock_pdf_legacy(file: UploadFile = File(...), password: str = Form(...)):
-    """Lock PDF with password"""
-    if not validate_pdf_file(file):
-        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
-    
-    if not validate_file_size_upload(file):
-        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
-    
-    try:
-        # Create temporary file
-        input_path = create_temp_file('.pdf')
-        output_path = create_temp_file('.pdf')
-        
-        # Save uploaded file
-        with open(input_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        # Check if PDF is already encrypted
+        # Attempt to open the PDF. pikepdf.Pdf.open handles decryption directly.
+        # It will raise an error if the password is incorrect or PDF is malformed.
         try:
-            with pikepdf.open(input_path) as pdf:
-                if pdf.is_encrypted:
-                    raise HTTPException(status_code=400, detail="PDF is already encrypted.")
+            pdf = pikepdf.Pdf.open(file.stream, password=password)
+            if not pdf.is_encrypted:
+                # If it opens without error *and* reports not encrypted, it means it was never locked
+                logging.info(f"Unlock PDF: File '{file.filename}' is not encrypted. Cannot unlock.")
+                return jsonify({"error": "This PDF is not encrypted. Cannot unlock."}), 400
+
         except pikepdf.PasswordError:
-            raise HTTPException(status_code=400, detail="PDF is already encrypted.")
+            logging.warning(f"Unlock PDF: Incorrect password for '{file.filename}'.")
+            return jsonify({"error": "Incorrect password for this PDF."}), 400
+        except pikepdf.PdfError as e: # Catches various PDF-related errors from pikepdf
+            logging.error(f"Unlock PDF: pikepdf error during open/decrypt for '{file.filename}': {e}")
+            return jsonify({"error": f"Failed to unlock PDF: Invalid PDF file or corrupted encryption: {str(e)}"}), 400
+        except Exception as e:
+            # Catch any other unexpected exceptions during the open attempt
+            logging.error(f"Unlock PDF: Unexpected error during pikepdf open/decrypt for '{file.filename}': {e}", exc_info=True)
+            return jsonify({"error": f"Failed to unlock PDF: An unexpected error occurred: {str(e)}"}), 500
 
-        # Try locking with pikepdf; fall back to PyPDF2 if needed
-        try:
-            with pikepdf.open(input_path) as pdf:
-                encryption = pikepdf.Encryption(user=password, owner=password, R=4)
-                pdf.save(output_path, encryption=encryption)
-        except Exception as primary_error:
-            logger.warning(f"pikepdf encryption failed, trying PyPDF2: {primary_error}")
-            try:
-                from PyPDF2 import PdfReader, PdfWriter
-                reader = PdfReader(input_path)
-                writer = PdfWriter()
-                for page in reader.pages:
-                    writer.add_page(page)
-                # Set both user and owner passwords
-                try:
-                    writer.encrypt(user_password=password, owner_password=password)
-                except TypeError:
-                    # Older PyPDF2 signature
-                    writer.encrypt(password)
-                with open(output_path, 'wb') as out_f:
-                    writer.write(out_f)
-            except Exception as fallback_error:
-                logger.error(f"PyPDF2 encryption failed: {fallback_error}")
-                raise HTTPException(status_code=500, detail="Failed to encrypt PDF")
+        # If we reach here, the PDF was successfully opened and implicitly decrypted by pikepdf.open
+        output = io.BytesIO()
+        pdf.save(output) # Saves the decrypted PDF without encryption
+        output.seek(0)
+
+        logging.info(f"Unlock PDF: Successfully unlocked and sent '{file.filename}'.")
+        return send_file(
+            output,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=f"unlocked_{file.filename}"
+        )
+
+    except Exception as e:
+        # General catch-all for any errors not caught by more specific pikepdf errors
+        logging.error(f"General error in unlock_pdf for '{file.filename}': {e}", exc_info=True)
+        return jsonify({"error": f"Failed to unlock PDF: An unexpected server error occurred: {str(e)}"}), 500
+
+# Lock PDF endpoint
+@app.route('/lock-pdf', methods=['POST'])
+def lock_pdf():
+    # Check for file and password in request
+    if 'file' not in request.files:
+        logging.error("Lock PDF: No file part in the request.")
+        return jsonify({"error": "No file part in the request."}), 400
+    if 'password' not in request.form:
+        logging.error("Lock PDF: Password not provided.")
+        return jsonify({"error": "Password not provided."}), 400
+
+    file = request.files['file']
+    password = request.form.get('password')
+
+    # Validate file presence and type
+    if file.filename == '':
+        logging.error("Lock PDF: No selected file.")
+        return jsonify({"error": "No selected file."}), 400
+    if not file.filename.lower().endswith('.pdf'):
+        logging.error(f"Lock PDF: Invalid file type uploaded: {file.filename}")
+        return jsonify({"error": "Invalid file type. Only PDF files are accepted."}), 400
+
+    try:
+        file.stream.seek(0) # Ensure stream is at the beginning
+        pdf = pikepdf.Pdf.open(file.stream)
+
+        output = io.BytesIO()
+        
+        # Define modern AES-256 encryption settings
+        encryption = pikepdf.Encryption(
+            user=password,
+            owner=password, # Owner password often same as user for simplicity in tools
+            R=6 # Revision 6 for AES-256 encryption
+        )
+        
+        pdf.save(output, encryption=encryption)
+        output.seek(0)
+
+        logging.info(f"Lock PDF: Successfully locked and sent '{file.filename}'.")
+        return send_file(
+            output,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=f"locked_{file.filename}"
+        )
+    except pikepdf.PdfError as e:
+        logging.error(f"Lock PDF: pikepdf error during lock for '{file.filename}': {e}")
+        return jsonify({"error": f"Failed to lock PDF: Invalid PDF structure or internal error: {str(e)}"}), 400
+    except Exception as e:
+        logging.error(f"Error locking PDF '{file.filename}': {e}", exc_info=True)
+        return jsonify({"error": f"Failed to lock PDF: An unexpected server error occurred: {str(e)}"}), 500
+
+
+# PDF LINK REMOVER ENDPOINT (updated for pikepdf)
+@app.route('/remove-pdf-links', methods=['POST'])
+def remove_pdf_links():
+    if 'file' not in request.files:
+        logging.error("Remove Links: No file part in the request.")
+        return jsonify({"error": "No file part in the request."}), 400
+
+    file = request.files['file']
+
+    if file.filename == '':
+        logging.error("Remove Links: No selected file.")
+        return jsonify({"error": "No selected file."}), 400
+    if not file.filename.lower().endswith('.pdf'):
+        logging.error(f"Remove Links: Invalid file type uploaded: {file.filename}")
+        return jsonify({"error": "Invalid file type. Only PDF files are accepted."}), 400
+
+    try:
+        file.stream.seek(0) # Ensure stream is at the beginning
+        pdf = pikepdf.Pdf.open(file.stream)
+
+        if pdf.is_encrypted:
+            logging.warning(f"Remove Links: Attempt to remove links from encrypted PDF '{file.filename}'.")
+            return jsonify({"error": "Failed to remove links: PDF is encrypted. Unlock it first."}), 400
+
+        for page in pdf.pages:
+            # Check if '/Annots' exists and is an Array
+            if '/Annots' in page and isinstance(page.Annots, pikepdf.Array):
+                new_annots = pikepdf.Array()
+                for annot in page.Annots:
+                    # Keep annotations that are NOT links
+                    # A link typically has /Subtype /Link or an Action (A) of type /URI or /GoTo
+                    is_link = False
+                    if annot.get('/Subtype') == '/Link':
+                        is_link = True
+                    elif annot.get('/A') and annot.A.get('/S') in ('/URI', '/GoTo'):
+                        is_link = True
+                    
+                    if not is_link:
+                        new_annots.append(annot)
+                
+                # Replace the /Annots array or delete it if empty
+                if len(new_annots) > 0:
+                    page.Annots = new_annots
+                else:
+                    del page.Annots # Remove the key if no annotations remain
+
+        output_pdf = io.BytesIO()
+        pdf.save(output_pdf) # Save the modified PDF
+        output_pdf.seek(0)
+
+        logging.info(f"Remove Links: Successfully removed links from and sent '{file.filename}'.")
+        return send_file(
+            output_pdf,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=f"links_removed_{file.filename}"
+        )
+
+    except pikepdf.PdfError as e:
+        logging.error(f"Error reading PDF file '{file.filename}' for link removal: {e}")
+        return jsonify({"error": f"Failed to read PDF for link removal: {str(e)}. It might be corrupted or malformed."}), 400
+    except Exception as e:
+        logging.error(f"Error processing PDF for link removal '{file.filename}': {e}", exc_info=True)
+        return jsonify({"error": f"Failed to remove links from PDF: An unexpected server error occurred: {str(e)}. It might be corrupted or complex."}), 500
+
+
+# PDF TO DOCX CONVERSION ENDPOINT
+@app.route('/pdf-to-docx', methods=['POST'])
+def pdf_to_docx():
+    if 'file' not in request.files:
+        logging.error("PDF to DOCX: No file part in the request.")
+        return jsonify({"error": "No file part in the request."}), 400
+
+    file = request.files['file']
+
+    if file.filename == '':
+        logging.error("PDF to DOCX: No selected file.")
+        return jsonify({"error": "No selected file."}), 400
+    if not file.filename.lower().endswith('.pdf'):
+        logging.error(f"PDF to DOCX: Invalid file type uploaded: {file.filename}")
+        return jsonify({"error": "Invalid file type. Only PDF files are accepted."}), 400
+
+    try:
+        file.stream.seek(0)
+        
+        # Open PDF with PyMuPDF for better text extraction
+        pdf_document = fitz.open(stream=file.stream, filetype="pdf")
+        
+        # Create a new Word document
+        doc = Document()
+        
+        # Set document margins
+        sections = doc.sections
+        for section in sections:
+            section.top_margin = Inches(1)
+            section.bottom_margin = Inches(1)
+            section.left_margin = Inches(1)
+            section.right_margin = Inches(1)
+        
+        # Process each page
+        for page_num in range(len(pdf_document)):
+            page = pdf_document[page_num]
+            
+            # Extract text blocks with positioning information
+            text_blocks = page.get_text("dict")
+            
+            # Add page break if not first page
+            if page_num > 0:
+                doc.add_page_break()
+            
+            # Process text blocks
+            if "blocks" in text_blocks:
+                for block in text_blocks["blocks"]:
+                    if "lines" in block:
+                        for line in block["lines"]:
+                            if "spans" in line:
+                                # Create a paragraph for each line
+                                paragraph = doc.add_paragraph()
+                                
+                                for span in line["spans"]:
+                                    if "text" in span and span["text"].strip():
+                                        # Get font information
+                                        font_size = span.get("size", 12)
+                                        font_name = span.get("font", "Arial")
+                                        is_bold = "bold" in font_name.lower() or font_size > 14
+                                        
+                                        # Add text run with formatting
+                                        run = paragraph.add_run(span["text"])
+                                        run.font.name = font_name
+                                        run.font.size = Pt(font_size)
+                                        run.bold = is_bold
+                                
+                                # Add spacing after paragraph
+                                paragraph.space_after = Pt(6)
+        
+        # Close the PDF document
+        pdf_document.close()
+        
+        # Save the Word document to a bytes buffer
+        docx_buffer = io.BytesIO()
+        doc.save(docx_buffer)
+        docx_buffer.seek(0)
         
         # Generate output filename
-        output_filename = f"locked_{file.filename}"
-        
-        logger.info(f"Successfully locked {file.filename}")
-        
-        # Return the locked file
-        return FileResponse(
-            path=output_path,
-            filename=output_filename,
-            media_type='application/pdf'
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error locking PDF: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to lock PDF: {str(e)}")
-    
-    finally:
-        # Cleanup temporary files
-        for path in [input_path, output_path]:
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except:
-                    pass
-
-# PDF Link Removal endpoint
-@app.post("/remove-pdf-links")
-async def remove_pdf_links_legacy(file: UploadFile = File(...)):
-    """Remove links and hyperlinks from PDF"""
-    if not validate_pdf_file(file):
-        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
-    
-    if not validate_file_size_upload(file):
-        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
-    
-    try:
-        # Create temporary file
-        input_path = create_temp_file('.pdf')
-        output_path = create_temp_file('.pdf')
-        
-        # Save uploaded file
-        with open(input_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        # Remove links using PyMuPDF
-        doc = fitz.open(input_path)
-        
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            
-            # Get all links on the page
-            links = page.get_links()
-            
-            # Remove each link
-            for link in links:
-                page.delete_link(link)
-        
-        # Save the modified PDF
-        doc.save(output_path)
-        doc.close()
-        
-        # Generate output filename
-        output_filename = f"links_removed_{file.filename}"
-        
-        logger.info(f"Successfully removed links from {file.filename}")
-        
-        # Return the modified file
-        return FileResponse(
-            path=output_path,
-            filename=output_filename,
-            media_type='application/pdf'
-        )
-        
-    except Exception as e:
-        logger.error(f"Error removing PDF links: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to remove links: {str(e)}")
-    
-    finally:
-        # Cleanup temporary files
-        for path in [input_path, output_path]:
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except:
-                    pass
-
-# Basic Endpoints
-
-@app.post("/compress-pdf")
-async def compress_pdf(file: UploadFile = File(...)):
-    """Compress PDF using PyMuPDF"""
-    if not validate_pdf_file(file):
-        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
-
-    if not validate_file_size_upload(file):
-        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
-
-    input_path = create_temp_file('.pdf')
-    output_path = create_temp_file('.pdf')
-
-    try:
-        with open(input_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        doc = fitz.open(input_path)
-        # Save with garbage collection, deflation, and cleaning
-        doc.save(output_path, garbage=4, deflate=True, clean=True)
-        doc.close()
-
-        output_filename = f"compressed_{file.filename}"
-        logger.info(f"Successfully compressed {file.filename} using basic compression")
-
-        return FileResponse(
-            path=output_path,
-            filename=output_filename,
-            media_type='application/pdf'
-        )
-    except Exception as e:
-        logger.error(f"Error compressing PDF: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to compress PDF: {str(e)}")
-    finally:
-        for path in [input_path, output_path]:
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except:
-                    pass
-
-@app.post("/convert/pdf-to-word")
-async def convert_pdf_to_word(file: UploadFile = File(...)):
-    """Convert PDF to Word document using pdf2docx"""
-    if not validate_pdf_file(file):
-        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
-
-    if not validate_file_size_upload(file):
-        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
-
-    input_path = create_temp_file('.pdf')
-    output_path = create_temp_file('.docx')
-
-    try:
-        with open(input_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        # First attempt: pdf2docx
-        try:
-            from pdf2docx import Converter
-            cv = Converter(input_path)
-            cv.convert(output_path, start=0, end=None)
-            cv.close()
-            method = "pdf2docx"
-        except Exception as primary_error:
-            logger.warning(f"pdf2docx failed, falling back to text-based DOCX: {primary_error}")
-            # Fallback: extract text with PyMuPDF and write a simple DOCX
-            try:
-                import fitz  # PyMuPDF
-                from docx import Document  # python-docx
-
-                document = Document()
-                with fitz.open(input_path) as doc:
-                    for page in doc:
-                        text = page.get_text()
-                        if text.strip():
-                            for line in text.splitlines():
-                                document.add_paragraph(line)
-                        else:
-                            document.add_paragraph(" ")
-                document.save(output_path)
-                method = "text-fallback"
-            except Exception as fallback_error:
-                logger.error(f"Fallback text DOCX creation failed: {fallback_error}")
-                raise HTTPException(status_code=500, detail="Conversion failed. Try a different file.")
-
         output_filename = file.filename.replace('.pdf', '.docx')
         if not output_filename.endswith('.docx'):
             output_filename += '.docx'
         
-        logger.info(f"Successfully converted {file.filename} to Word using {method}")
-
-        return FileResponse(
-            path=output_path,
-            filename=output_filename,
-            media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        logging.info(f"PDF to DOCX: Successfully converted '{file.filename}' to DOCX.")
+        return send_file(
+            docx_buffer,
+            mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            as_attachment=True,
+            download_name=output_filename
         )
-    except HTTPException:
-        raise
+
+    except fitz.FileDataError as e:
+        logging.error(f"PDF to DOCX: Invalid or corrupted PDF file '{file.filename}': {e}")
+        return jsonify({"error": f"Invalid PDF file: {str(e)}"}), 400
     except Exception as e:
-        logger.error(f"Error converting PDF to Word: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to convert PDF to Word: {str(e)}")
-    finally:
-        for path in [input_path, output_path]:
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except:
-                    pass
+        logging.error(f"PDF to DOCX: Error converting '{file.filename}': {e}", exc_info=True)
+        return jsonify({"error": f"Failed to convert PDF to DOCX: {str(e)}"}), 500
 
-@app.post("/convert/pdf-to-excel")
-async def convert_pdf_to_excel(file: UploadFile = File(...)):
-    """Convert PDF tables to Excel using pdfplumber + pandas (basic)"""
-    if not validate_pdf_file(file):
-        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
-
-    if not validate_file_size_upload(file):
-        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
-
-    input_path = create_temp_file('.pdf')
-    output_path = create_temp_file('.xlsx')
-
-    try:
-        with open(input_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        import pdfplumber
-        import pandas as pd
-
-        tables_found = 0
-        with pdfplumber.open(input_path) as pdf:
-            with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-                for page_index, page in enumerate(pdf.pages, start=1):
-                    try:
-                        # stream mode is more forgiving; lattice needs vector lines
-                        extracted_tables = page.extract_tables()
-                        if not extracted_tables:
-                            # try explicit settings to improve detection
-                            extracted_tables = page.extract_tables(table_settings={
-                                'vertical_strategy': 'lines',
-                                'horizontal_strategy': 'lines',
-                                'intersection_tolerance': 5
-                            })
-                        for table_index, table in enumerate(extracted_tables, start=1):
-                            if not table:
-                                continue
-                            df = pd.DataFrame(table)
-                            sheet_name = f"p{page_index}_t{table_index}"
-                            df.to_excel(writer, index=False, header=False, sheet_name=sheet_name)
-                            tables_found += 1
-                    except Exception:
-                        # skip problematic pages but continue others
-                        continue
-
-        if tables_found == 0:
-            raise HTTPException(status_code=400, detail="No tables detected in PDF. Try Adobe mode or another file.")
-
-        output_filename = file.filename.replace('.pdf', '.xlsx')
-        if not output_filename.endswith('.xlsx'):
-            output_filename += '.xlsx'
-
-        logger.info(f"Successfully converted {file.filename} to Excel using basic conversion with {tables_found} tables")
-
-        return FileResponse(
-            path=output_path,
-            filename=output_filename,
-            media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error converting PDF to Excel: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to convert PDF to Excel: {str(e)}")
-    finally:
-        for path in [input_path, output_path]:
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except:
-                    pass
-
-@app.post("/convert/pdf-to-text")
-async def convert_pdf_to_text(file: UploadFile = File(...)):
-    """Extract text from PDF using pdfplumber"""
-    if not validate_pdf_file(file):
-        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
-
-    if not validate_file_size_upload(file):
-        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
-
-    input_path = create_temp_file('.pdf')
-    output_path = create_temp_file('.txt')
-
-    try:
-        with open(input_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        import pdfplumber
-        text_parts = []
-        with pdfplumber.open(input_path) as pdf:
-            for page in pdf.pages:
-                text = page.extract_text() or ""
-                text_parts.append(text)
-        full_text = "\n\n".join(text_parts).strip()
-
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(full_text)
-
-        output_filename = file.filename.replace('.pdf', '.txt')
-        if not output_filename.endswith('.txt'):
-            output_filename += '.txt'
-
-        logger.info(f"Extracted text from {file.filename} ({len(full_text)} chars)")
-
-        return FileResponse(
-            path=output_path,
-            filename=output_filename,
-            media_type='text/plain'
-        )
-    except Exception as e:
-        logger.error(f"Error extracting text: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to extract text: {str(e)}")
-    finally:
-        for path in [input_path, output_path]:
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except:
-                    pass
-
-@app.post("/convert/word-to-pdf")
-async def convert_word_to_pdf(file: UploadFile = File(...)):
-    """Convert Word document to PDF using LibreOffice headless"""
-    allowed = ['.docx', '.doc']
-    if not any(file.filename.lower().endswith(ext) for ext in allowed):
-        raise HTTPException(status_code=400, detail="Invalid file type. Only .docx or .doc accepted.")
-
-    if not validate_file_size_upload(file):
-        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
-
-    import subprocess
-
-    input_ext = os.path.splitext(file.filename)[1].lower()
-    input_path = create_temp_file(input_ext)
-    output_dir = TEMP_DIR
-
-    try:
-        with open(input_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        # Run LibreOffice headless conversion
-        cmd = [
-            "soffice", "--headless", "--convert-to", "pdf",
-            "--outdir", output_dir, input_path
-        ]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
-        if result.returncode != 0:
-            logger.error(f"LibreOffice error: {result.stderr}")
-            raise HTTPException(status_code=500, detail="LibreOffice conversion failed")
-
-        output_path = os.path.splitext(input_path)[0] + '.pdf'
-        if not os.path.exists(output_path):
-            # Some LibreOffice versions keep original basename
-            candidate = os.path.join(output_dir, os.path.basename(os.path.splitext(input_path)[0]) + '.pdf')
-            if os.path.exists(candidate):
-                output_path = candidate
-            else:
-                raise HTTPException(status_code=500, detail="Converted file not found")
-
-        output_filename = file.filename.rsplit('.', 1)[0] + '.pdf'
-
-        logger.info(f"Converted {file.filename} to PDF via LibreOffice")
-
-        return FileResponse(
-            path=output_path,
-            filename=output_filename,
-            media_type='application/pdf'
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error converting Word to PDF: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to convert Word to PDF: {str(e)}")
-    finally:
-        # Do not remove output_path here as FileResponse serves from disk; lifecycle cleanup task will remove old files
-        if os.path.exists(input_path):
-            try:
-                os.remove(input_path)
-            except:
-                pass
-
-# Adobe Enhanced Endpoints
-
-@app.post("/adobe/convert/pdf-to-word")
-async def adobe_convert_pdf_to_word(file: UploadFile = File(...)):
-    """Convert PDF to Word document using Adobe PDF Services (Professional quality)"""
-    if not validate_pdf_file(file):
-        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
-    
-    if not validate_file_size_upload(file):
-        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
-    
-    try:
-        # Create temporary files
-        input_path = create_temp_file('.pdf')
-        output_path = create_temp_file('.docx')
-        
-        # Save uploaded file
-        with open(input_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        # Use Adobe service for conversion
-        success = await adobe_service.convert_pdf_to_word(input_path, output_path)
-        
-        if success:
-            # Generate output filename
-            output_filename = file.filename.replace('.pdf', '.docx')
-            if not output_filename.endswith('.docx'):
-                output_filename += '.docx'
-            
-            logger.info(f"Successfully converted {file.filename} to Word using Adobe")
-            
-            # Return the converted file
-            return FileResponse(
-                path=output_path,
-                filename=output_filename,
-                media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-            )
-        else:
-            raise HTTPException(status_code=500, detail="Adobe conversion failed. Please try again.")
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error converting PDF to Word with Adobe: {e}")
-        raise HTTPException(status_code=500, detail=f"Conversion failed: {str(e)}")
-    
-    finally:
-        # Cleanup temporary files
-        for path in [input_path, output_path]:
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except:
-                    pass
-
-@app.post("/adobe/convert/pdf-to-excel")
-async def adobe_convert_pdf_to_excel(file: UploadFile = File(...)):
-    """Convert PDF to Excel using Adobe PDF Services (Professional quality)"""
-    if not validate_pdf_file(file):
-        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
-    
-    if not validate_file_size_upload(file):
-        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
-    
-    try:
-        # Create temporary files
-        input_path = create_temp_file('.pdf')
-        output_path = create_temp_file('.xlsx')
-        
-        # Save uploaded file
-        with open(input_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        # Use Adobe service for conversion
-        success = await adobe_service.convert_pdf_to_excel(input_path, output_path)
-        
-        if success:
-            # Generate output filename
-            output_filename = file.filename.replace('.pdf', '.xlsx')
-            if not output_filename.endswith('.xlsx'):
-                output_filename += '.xlsx'
-            
-            logger.info(f"Successfully converted {file.filename} to Excel using Adobe")
-            
-            # Return the converted file
-            return FileResponse(
-                path=output_path,
-                filename=output_filename,
-                media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-            )
-        else:
-            raise HTTPException(status_code=500, detail="Adobe conversion failed. Please try again.")
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error converting PDF to Excel with Adobe: {e}")
-        raise HTTPException(status_code=500, detail=f"Conversion failed: {str(e)}")
-    
-    finally:
-        # Cleanup temporary files
-        for path in [input_path, output_path]:
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except:
-                    pass
-
-@app.post("/adobe/compress-pdf")
-async def adobe_compress_pdf(
-    file: UploadFile = File(...),
-    compression_level: str = Form("medium")
-):
-    """Compress PDF using Adobe PDF Services (Professional quality)"""
-    if not validate_pdf_file(file):
-        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
-    
-    if not validate_file_size_upload(file):
-        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
-    
-    if compression_level not in ['low', 'medium', 'high']:
-        raise HTTPException(status_code=400, detail="Invalid compression level. Use: low, medium, or high.")
-    
-    try:
-        # Create temporary files
-        input_path = create_temp_file('.pdf')
-        output_path = create_temp_file('.pdf')
-        
-        # Save uploaded file
-        with open(input_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        # Use Adobe service for compression
-        success = await adobe_service.compress_pdf(input_path, output_path, compression_level)
-        
-        if success:
-            # Generate output filename
-            output_filename = f"compressed_{file.filename}"
-            
-            logger.info(f"Successfully compressed {file.filename} using Adobe")
-            
-            # Return the compressed file
-            return FileResponse(
-                path=output_path,
-                filename=output_filename,
-                media_type='application/pdf'
-            )
-        else:
-            raise HTTPException(status_code=500, detail="Adobe compression failed. Please try again.")
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error compressing PDF with Adobe: {e}")
-        raise HTTPException(status_code=500, detail=f"Compression failed: {str(e)}")
-    
-    finally:
-        # Cleanup temporary files
-        for path in [input_path, output_path]:
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except:
-                    pass
-
- 
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=4000)
+# Main entry point
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=4000)
