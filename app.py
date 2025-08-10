@@ -32,10 +32,16 @@ app = FastAPI(
 )
 
 # Configure CORS
+ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "https://www.quicksidetool.online",
+    "https://quicksidetool.online"
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For production, restrict to your domains
-    allow_credentials=False,  # Wildcard cannot be used with credentials
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
@@ -219,11 +225,31 @@ async def lock_pdf_legacy(file: UploadFile = File(...), password: str = Form(...
                     raise HTTPException(status_code=400, detail="PDF is already encrypted.")
         except pikepdf.PasswordError:
             raise HTTPException(status_code=400, detail="PDF is already encrypted.")
-        
-        # Lock (encrypt) PDF using pikepdf
-        with pikepdf.open(input_path) as pdf:
-            encryption = pikepdf.Encryption(user=password, owner=password, R=4)
-            pdf.save(output_path, encryption=encryption)
+
+        # Try locking with pikepdf; fall back to PyPDF2 if needed
+        try:
+            with pikepdf.open(input_path) as pdf:
+                encryption = pikepdf.Encryption(user=password, owner=password, R=4)
+                pdf.save(output_path, encryption=encryption)
+        except Exception as primary_error:
+            logger.warning(f"pikepdf encryption failed, trying PyPDF2: {primary_error}")
+            try:
+                from PyPDF2 import PdfReader, PdfWriter
+                reader = PdfReader(input_path)
+                writer = PdfWriter()
+                for page in reader.pages:
+                    writer.add_page(page)
+                # Set both user and owner passwords
+                try:
+                    writer.encrypt(user_password=password, owner_password=password)
+                except TypeError:
+                    # Older PyPDF2 signature
+                    writer.encrypt(password)
+                with open(output_path, 'wb') as out_f:
+                    writer.write(out_f)
+            except Exception as fallback_error:
+                logger.error(f"PyPDF2 encryption failed: {fallback_error}")
+                raise HTTPException(status_code=500, detail="Failed to encrypt PDF")
         
         # Generate output filename
         output_filename = f"locked_{file.filename}"
