@@ -6,3 +6,6 @@ PyMuPDF
 pdf2docx
 aiohttp
 PyJWT
+pdfplumber
+pandas
+openpyxl

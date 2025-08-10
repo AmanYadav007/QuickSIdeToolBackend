@@ -34,10 +34,11 @@ app = FastAPI(
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
-    allow_credentials=True,
+    allow_origins=["*"],  # For production, restrict to your domains
+    allow_credentials=False,  # Wildcard cannot be used with credentials
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
 # Configuration
@@ -124,6 +125,8 @@ async def root():
             "adobe_pdf_to_word": "/adobe/convert/pdf-to-word",
             "adobe_pdf_to_excel": "/adobe/convert/pdf-to-excel",
             "adobe_compress_pdf": "/adobe/compress-pdf",
+            "convert_pdf_to_word": "/convert/pdf-to-word",
+            "convert_pdf_to_excel": "/convert/pdf-to-excel",
             "health": "/health"
         }
     }
@@ -385,6 +388,77 @@ async def convert_pdf_to_word(file: UploadFile = File(...)):
     except Exception as e:
         logger.error(f"Error converting PDF to Word: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to convert PDF to Word: {str(e)}")
+    finally:
+        for path in [input_path, output_path]:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except:
+                    pass
+
+@app.post("/convert/pdf-to-excel")
+async def convert_pdf_to_excel(file: UploadFile = File(...)):
+    """Convert PDF tables to Excel using pdfplumber + pandas (basic)"""
+    if not validate_pdf_file(file):
+        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
+
+    if not validate_file_size_upload(file):
+        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
+
+    input_path = create_temp_file('.pdf')
+    output_path = create_temp_file('.xlsx')
+
+    try:
+        with open(input_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        import pdfplumber
+        import pandas as pd
+
+        tables_found = 0
+        with pdfplumber.open(input_path) as pdf:
+            with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+                for page_index, page in enumerate(pdf.pages, start=1):
+                    try:
+                        # stream mode is more forgiving; lattice needs vector lines
+                        extracted_tables = page.extract_tables()
+                        if not extracted_tables:
+                            # try explicit settings to improve detection
+                            extracted_tables = page.extract_tables(table_settings={
+                                'vertical_strategy': 'lines',
+                                'horizontal_strategy': 'lines',
+                                'intersection_tolerance': 5
+                            })
+                        for table_index, table in enumerate(extracted_tables, start=1):
+                            if not table:
+                                continue
+                            df = pd.DataFrame(table)
+                            sheet_name = f"p{page_index}_t{table_index}"
+                            df.to_excel(writer, index=False, header=False, sheet_name=sheet_name)
+                            tables_found += 1
+                    except Exception:
+                        # skip problematic pages but continue others
+                        continue
+
+        if tables_found == 0:
+            raise HTTPException(status_code=400, detail="No tables detected in PDF. Try Adobe mode or another file.")
+
+        output_filename = file.filename.replace('.pdf', '.xlsx')
+        if not output_filename.endswith('.xlsx'):
+            output_filename += '.xlsx'
+
+        logger.info(f"Successfully converted {file.filename} to Excel using basic conversion with {tables_found} tables")
+
+        return FileResponse(
+            path=output_path,
+            filename=output_filename,
+            media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error converting PDF to Excel: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to convert PDF to Excel: {str(e)}")
     finally:
         for path in [input_path, output_path]:
             if os.path.exists(path):
