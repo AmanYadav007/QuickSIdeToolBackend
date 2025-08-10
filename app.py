@@ -220,9 +220,10 @@ async def lock_pdf_legacy(file: UploadFile = File(...), password: str = Form(...
         except pikepdf.PasswordError:
             raise HTTPException(status_code=400, detail="PDF is already encrypted.")
         
-        # Lock PDF using pikepdf
+        # Lock (encrypt) PDF using pikepdf
         with pikepdf.open(input_path) as pdf:
-            pdf.save(output_path, encrypt=True, password=password)
+            encryption = pikepdf.Encryption(user=password, owner=password, R=4)
+            pdf.save(output_path, encryption=encryption)
         
         # Generate output filename
         output_filename = f"locked_{file.filename}"
