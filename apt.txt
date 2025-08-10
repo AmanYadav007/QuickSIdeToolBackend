@@ -1,0 +1,7 @@
+poppler-utils
+ghostscript
+default-jre
+libreoffice
+tesseract-ocr
+fonts-dejavu
+

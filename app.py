@@ -127,6 +127,8 @@ async def root():
             "adobe_compress_pdf": "/adobe/compress-pdf",
             "convert_pdf_to_word": "/convert/pdf-to-word",
             "convert_pdf_to_excel": "/convert/pdf-to-excel",
+            "convert_pdf_to_text": "/convert/pdf-to-text",
+            "convert_word_to_pdf": "/convert/word-to-pdf",
             "health": "/health"
         }
     }
@@ -368,23 +370,48 @@ async def convert_pdf_to_word(file: UploadFile = File(...)):
         with open(input_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # Convert PDF to Word
-        from pdf2docx import Converter
-        cv = Converter(input_path)
-        cv.convert(output_path, start=0, end=None)
-        cv.close()
+        # First attempt: pdf2docx
+        try:
+            from pdf2docx import Converter
+            cv = Converter(input_path)
+            cv.convert(output_path, start=0, end=None)
+            cv.close()
+            method = "pdf2docx"
+        except Exception as primary_error:
+            logger.warning(f"pdf2docx failed, falling back to text-based DOCX: {primary_error}")
+            # Fallback: extract text with PyMuPDF and write a simple DOCX
+            try:
+                import fitz  # PyMuPDF
+                from docx import Document  # python-docx
+
+                document = Document()
+                with fitz.open(input_path) as doc:
+                    for page in doc:
+                        text = page.get_text()
+                        if text.strip():
+                            for line in text.splitlines():
+                                document.add_paragraph(line)
+                        else:
+                            document.add_paragraph(" ")
+                document.save(output_path)
+                method = "text-fallback"
+            except Exception as fallback_error:
+                logger.error(f"Fallback text DOCX creation failed: {fallback_error}")
+                raise HTTPException(status_code=500, detail="Conversion failed. Try a different file.")
 
         output_filename = file.filename.replace('.pdf', '.docx')
         if not output_filename.endswith('.docx'):
             output_filename += '.docx'
         
-        logger.info(f"Successfully converted {file.filename} to Word using basic conversion")
+        logger.info(f"Successfully converted {file.filename} to Word using {method}")
 
         return FileResponse(
             path=output_path,
             filename=output_filename,
             media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error converting PDF to Word: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to convert PDF to Word: {str(e)}")
@@ -466,6 +493,116 @@ async def convert_pdf_to_excel(file: UploadFile = File(...)):
                     os.remove(path)
                 except:
                     pass
+
+@app.post("/convert/pdf-to-text")
+async def convert_pdf_to_text(file: UploadFile = File(...)):
+    """Extract text from PDF using pdfplumber"""
+    if not validate_pdf_file(file):
+        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
+
+    if not validate_file_size_upload(file):
+        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
+
+    input_path = create_temp_file('.pdf')
+    output_path = create_temp_file('.txt')
+
+    try:
+        with open(input_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        import pdfplumber
+        text_parts = []
+        with pdfplumber.open(input_path) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text() or ""
+                text_parts.append(text)
+        full_text = "\n\n".join(text_parts).strip()
+
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(full_text)
+
+        output_filename = file.filename.replace('.pdf', '.txt')
+        if not output_filename.endswith('.txt'):
+            output_filename += '.txt'
+
+        logger.info(f"Extracted text from {file.filename} ({len(full_text)} chars)")
+
+        return FileResponse(
+            path=output_path,
+            filename=output_filename,
+            media_type='text/plain'
+        )
+    except Exception as e:
+        logger.error(f"Error extracting text: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to extract text: {str(e)}")
+    finally:
+        for path in [input_path, output_path]:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except:
+                    pass
+
+@app.post("/convert/word-to-pdf")
+async def convert_word_to_pdf(file: UploadFile = File(...)):
+    """Convert Word document to PDF using LibreOffice headless"""
+    allowed = ['.docx', '.doc']
+    if not any(file.filename.lower().endswith(ext) for ext in allowed):
+        raise HTTPException(status_code=400, detail="Invalid file type. Only .docx or .doc accepted.")
+
+    if not validate_file_size_upload(file):
+        raise HTTPException(status_code=400, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB.")
+
+    import subprocess
+
+    input_ext = os.path.splitext(file.filename)[1].lower()
+    input_path = create_temp_file(input_ext)
+    output_dir = TEMP_DIR
+
+    try:
+        with open(input_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        # Run LibreOffice headless conversion
+        cmd = [
+            "soffice", "--headless", "--convert-to", "pdf",
+            "--outdir", output_dir, input_path
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+        if result.returncode != 0:
+            logger.error(f"LibreOffice error: {result.stderr}")
+            raise HTTPException(status_code=500, detail="LibreOffice conversion failed")
+
+        output_path = os.path.splitext(input_path)[0] + '.pdf'
+        if not os.path.exists(output_path):
+            # Some LibreOffice versions keep original basename
+            candidate = os.path.join(output_dir, os.path.basename(os.path.splitext(input_path)[0]) + '.pdf')
+            if os.path.exists(candidate):
+                output_path = candidate
+            else:
+                raise HTTPException(status_code=500, detail="Converted file not found")
+
+        output_filename = file.filename.rsplit('.', 1)[0] + '.pdf'
+
+        logger.info(f"Converted {file.filename} to PDF via LibreOffice")
+
+        return FileResponse(
+            path=output_path,
+            filename=output_filename,
+            media_type='application/pdf'
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error converting Word to PDF: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to convert Word to PDF: {str(e)}")
+    finally:
+        # Do not remove output_path here as FileResponse serves from disk; lifecycle cleanup task will remove old files
+        if os.path.exists(input_path):
+            try:
+                os.remove(input_path)
+            except:
+                pass
 
 # Adobe Enhanced Endpoints
 
