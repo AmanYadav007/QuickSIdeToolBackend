@@ -682,6 +682,97 @@ def convert_pdf_to_excel():
         logging.error(f"PDF to Excel: Error converting '{file.filename}': {e}", exc_info=True)
         return jsonify({"error": f"Failed to convert PDF to Excel: {str(e)}"}), 500
 
+# PDF COMPRESSION ENDPOINT
+@app.route('/compress-pdf', methods=['POST'])
+def compress_pdf():
+    """
+    Compress PDF files using PyMuPDF with multiple compression levels
+    Supports different compression strategies for various use cases
+    """
+    if 'file' not in request.files:
+        logging.error("PDF compression: No file part in the request.")
+        return jsonify({"error": "No file part in the request."}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        logging.error("PDF compression: No selected file.")
+        return jsonify({"error": "No selected file."}), 400
+    if not file.filename.lower().endswith('.pdf'):
+        logging.error(f"PDF compression: Invalid file type uploaded: {file.filename}")
+        return jsonify({"error": "Invalid file type. Only PDF files are accepted."}), 400
+
+    # Get compression parameters
+    compression_level = request.form.get('compression_level', 'medium')
+    
+    try:
+        file.stream.seek(0)
+        
+        # Read PDF bytes for PyMuPDF
+        pdf_bytes = file.read()
+        
+        # Open PDF with PyMuPDF
+        pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        
+        # Prepare output buffer
+        output_buffer = io.BytesIO()
+        
+        # Apply compression based on level
+        if compression_level == 'low':
+            # Light compression - maintain quality
+            pdf_document.save(
+                output_buffer,
+                garbage=2,      # Remove unused objects
+                deflate=True,   # Compress streams
+                clean=True,     # Clean content streams
+                linear=True     # Optimize for web
+            )
+        elif compression_level == 'high':
+            # Aggressive compression - maximum size reduction
+            pdf_document.save(
+                output_buffer,
+                garbage=4,      # Remove all unused objects
+                deflate=True,   # Compress streams
+                clean=True,     # Clean content streams
+                linear=True,    # Optimize for web
+                pretty=False    # Remove formatting
+            )
+        else:  # medium (default)
+            # Balanced compression - good quality and size
+            pdf_document.save(
+                output_buffer,
+                garbage=3,      # Remove most unused objects
+                deflate=True,   # Compress streams
+                clean=True,     # Clean content streams
+                linear=True     # Optimize for web
+            )
+        
+        # Close the PDF document
+        pdf_document.close()
+        
+        output_buffer.seek(0)
+        
+        # Generate output filename
+        base_name = os.path.splitext(file.filename)[0]
+        output_filename = f"compressed_{base_name}.pdf"
+        
+        # Calculate compression ratio
+        original_size = len(pdf_bytes)
+        compressed_size = len(output_buffer.getvalue())
+        compression_ratio = ((original_size - compressed_size) / original_size) * 100
+        
+        logging.info(f"PDF compression: Successfully compressed '{file.filename}' with {compression_level} compression. Size reduced by {compression_ratio:.1f}%")
+        
+        return send_file(
+            output_buffer,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=output_filename
+        )
+
+    except Exception as e:
+        logging.error(f"PDF compression: Error processing '{file.filename}': {e}", exc_info=True)
+        return jsonify({"error": f"Failed to compress PDF: {str(e)}"}), 500
+
 # Main entry point
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=4000)
