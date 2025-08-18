@@ -728,6 +728,7 @@ def compress_pdf():
             )
         elif compression_level == 'high':
             # Aggressive compression - maximum size reduction
+            # First pass: remove unused objects and clean
             pdf_document.save(
                 output_buffer,
                 garbage=4,      # Remove all unused objects
@@ -735,17 +736,26 @@ def compress_pdf():
                 clean=True,     # Clean content streams
                 linear=True,    # Optimize for web
                 pretty=False,   # Remove formatting
-                ascii=False,    # Use binary instead of ASCII
-                compress=True   # Enable additional compression
+                ascii=False     # Use binary instead of ASCII
             )
             
-            # Additional compression for high level
-            # Reopen and recompress for better results
+            # Second pass: additional optimization
             output_buffer.seek(0)
-            compressed_pdf = fitz.open(stream=output_buffer.getvalue(), filetype="pdf")
+            optimized_pdf = fitz.open(stream=output_buffer.getvalue(), filetype="pdf")
             final_buffer = io.BytesIO()
-            compressed_pdf.save(final_buffer, garbage=4, deflate=True, clean=True, linear=True)
-            compressed_pdf.close()
+            
+            # Final save with maximum compression
+            optimized_pdf.save(
+                final_buffer,
+                garbage=4,
+                deflate=True,
+                clean=True,
+                linear=True,
+                pretty=False,
+                ascii=False
+            )
+            
+            optimized_pdf.close()
             final_buffer.seek(0)
             output_buffer = final_buffer
             
