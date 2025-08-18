@@ -718,10 +718,10 @@ def compress_pdf():
         
         # Apply compression based on level
         if compression_level == 'low':
-            # Light compression - maintain quality
+            # Light compression - maintain quality, minimal size reduction
             pdf_document.save(
                 output_buffer,
-                garbage=2,      # Remove unused objects
+                garbage=1,      # Remove unused objects
                 deflate=True,   # Compress streams
                 clean=True,     # Clean content streams
                 linear=True     # Optimize for web
@@ -734,13 +734,26 @@ def compress_pdf():
                 deflate=True,   # Compress streams
                 clean=True,     # Clean content streams
                 linear=True,    # Optimize for web
-                pretty=False    # Remove formatting
+                pretty=False,   # Remove formatting
+                ascii=False,    # Use binary instead of ASCII
+                compress=True   # Enable additional compression
             )
+            
+            # Additional compression for high level
+            # Reopen and recompress for better results
+            output_buffer.seek(0)
+            compressed_pdf = fitz.open(stream=output_buffer.getvalue(), filetype="pdf")
+            final_buffer = io.BytesIO()
+            compressed_pdf.save(final_buffer, garbage=4, deflate=True, clean=True, linear=True)
+            compressed_pdf.close()
+            final_buffer.seek(0)
+            output_buffer = final_buffer
+            
         else:  # medium (default)
             # Balanced compression - good quality and size
             pdf_document.save(
                 output_buffer,
-                garbage=3,      # Remove most unused objects
+                garbage=2,      # Remove most unused objects
                 deflate=True,   # Compress streams
                 clean=True,     # Clean content streams
                 linear=True     # Optimize for web
@@ -751,16 +764,37 @@ def compress_pdf():
         
         output_buffer.seek(0)
         
-        # Generate output filename
-        base_name = os.path.splitext(file.filename)[0]
-        output_filename = f"compressed_{base_name}.pdf"
-        
         # Calculate compression ratio
         original_size = len(pdf_bytes)
         compressed_size = len(output_buffer.getvalue())
         compression_ratio = ((original_size - compressed_size) / original_size) * 100
         
-        logging.info(f"PDF compression: Successfully compressed '{file.filename}' with {compression_level} compression. Size reduced by {compression_ratio:.1f}%")
+        logging.info(f"PDF compression: '{file.filename}' - Original: {original_size/1024:.1f}KB, Compressed: {compressed_size/1024:.1f}KB, Reduction: {compression_ratio:.1f}%")
+        
+        # If compression didn't work well, try alternative method
+        if compression_ratio < 5:  # Less than 5% reduction
+            logging.info(f"Low compression achieved, trying alternative method for '{file.filename}'")
+            # Try with more aggressive settings
+            pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+            alt_buffer = io.BytesIO()
+            pdf_document.save(alt_buffer, garbage=4, deflate=True, clean=True, linear=True, pretty=False, ascii=False)
+            pdf_document.close()
+            alt_buffer.seek(0)
+            
+            alt_size = len(alt_buffer.getvalue())
+            alt_ratio = ((original_size - alt_size) / original_size) * 100
+            
+            if alt_ratio > compression_ratio:
+                output_buffer = alt_buffer
+                compressed_size = alt_size
+                compression_ratio = alt_ratio
+                logging.info(f"Alternative method better: {alt_ratio:.1f}% reduction")
+        
+        logging.info(f"PDF compression: Successfully compressed '{file.filename}' with {compression_level} compression. Final reduction: {compression_ratio:.1f}%")
+        
+        # Generate output filename
+        base_name = os.path.splitext(file.filename)[0]
+        output_filename = f"compressed_{base_name}.pdf"
         
         return send_file(
             output_buffer,
