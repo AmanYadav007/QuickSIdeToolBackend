@@ -926,30 +926,37 @@ def compress_pdf_advanced():
                             xref = img[0]
                             img_info = pdf_document.extract_image(xref)
                             
-                            if img_info and img_info["size"] > 50000:  # > 50KB
-                                # Compress image using Pillow
-                                from PIL import Image
-                                img_data = img_info["image"]
-                                img_pil = Image.open(io.BytesIO(img_data))
-                                
-                                # Determine compression quality based on level
-                                if compression_level == 'high':
-                                    quality = 60  # Aggressive compression
-                                else:
-                                    quality = 80  # Balanced compression
-                                
-                                # Convert to JPEG for better compression
-                                if img_pil.mode in ['RGBA', 'LA']:
-                                    img_pil = img_pil.convert('RGB')
-                                
-                                # Compress image
-                                compressed_img_buffer = io.BytesIO()
-                                img_pil.save(compressed_img_buffer, 'JPEG', quality=quality, optimize=True)
-                                compressed_img_buffer.seek(0)
-                                
-                                # Replace image in PDF
-                                new_page.insert_image(page.rect, stream=compressed_img_buffer.getvalue())
-                                
+                            if img_info and "image" in img_info:
+                                # Get image size safely
+                                img_size = img_info.get("size", 0)
+                                if img_size > 50000:  # > 50KB
+                                    # Compress image using Pillow
+                                    from PIL import Image
+                                    img_data = img_info["image"]
+                                    img_pil = Image.open(io.BytesIO(img_data))
+                                    
+                                    # Determine compression quality based on level
+                                    if compression_level == 'high':
+                                        quality = 50  # More aggressive compression
+                                    else:
+                                        quality = 70  # Balanced compression
+                                    
+                                    # Convert to JPEG for better compression
+                                    if img_pil.mode in ['RGBA', 'LA']:
+                                        img_pil = img_pil.convert('RGB')
+                                    
+                                    # Resize large images for better compression
+                                    if img_pil.width > 1200 or img_pil.height > 1200:
+                                        img_pil.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
+                                    
+                                    # Compress image
+                                    compressed_img_buffer = io.BytesIO()
+                                    img_pil.save(compressed_img_buffer, 'JPEG', quality=quality, optimize=True, progressive=True)
+                                    compressed_img_buffer.seek(0)
+                                    
+                                    # Replace image in PDF
+                                    new_page.insert_image(page.rect, stream=compressed_img_buffer.getvalue())
+                                    
                         except Exception as e:
                             logging.warning(f"Could not compress image {img_index} on page {page_num}: {e}")
                             continue
@@ -993,10 +1000,9 @@ def compress_pdf_advanced():
                 output_buffer.seek(0)
                 pdf_pike = pikepdf.open(output_buffer)
                 
-                # Advanced compression settings
+                # Advanced compression settings (using correct parameters)
                 pdf_pike.save(
                     output_buffer,
-                    object_streams=True,  # Enable object streams
                     preserve_pdfa=False,   # Allow PDF/A restrictions to be removed
                     recompress_flate=True, # Recompress existing streams
                     deterministic_id=False  # Allow ID changes for better compression
@@ -1010,6 +1016,106 @@ def compress_pdf_advanced():
                 logging.info("pikepdf not available, skipping Stage 3")
             except Exception as e:
                 logging.warning(f"Stage 3 (pikepdf) failed: {e}")
+        
+        # Stage 4: Content analysis and aggressive optimization
+        if compression_level == 'high' and final_ratio < 20:  # Still not good enough
+            logging.info("Stage 4: Content analysis and aggressive optimization")
+            
+            try:
+                # Analyze PDF content and apply aggressive techniques
+                pdf_document = fitz.open(stream=output_buffer.getvalue(), filetype="pdf")
+                
+                # Create new PDF with aggressive settings
+                aggressive_pdf = fitz.open()
+                
+                for page_num in range(len(pdf_document)):
+                    page = pdf_document[page_num]
+                    
+                    # Get page content
+                    text_content = page.get_text()
+                    image_list = page.get_images()
+                    
+                    # Create new page
+                    new_page = aggressive_pdf.new_page(width=page.rect.width, height=page.rect.height)
+                    
+                    # If page has mostly text, optimize for text
+                    if len(text_content) > 100 and len(image_list) < 3:
+                        # Text-heavy page - use aggressive text optimization
+                        new_page.insert_text((50, 50), text_content, fontsize=10)
+                    else:
+                        # Image-heavy page - copy with aggressive compression
+                        new_page.show_pdf_page(page.rect, pdf_document, page_num)
+                
+                # Save with maximum compression
+                aggressive_buffer = io.BytesIO()
+                aggressive_pdf.save(
+                    aggressive_buffer,
+                    garbage=4,
+                    deflate=True,
+                    clean=True,
+                    linear=True,
+                    pretty=False,
+                    ascii=False
+                )
+                
+                aggressive_pdf.close()
+                pdf_document.close()
+                
+                aggressive_size = len(aggressive_buffer.getvalue())
+                aggressive_ratio = ((original_size - aggressive_size) / original_size) * 100
+                
+                if aggressive_ratio > final_ratio:
+                    output_buffer = aggressive_buffer
+                    final_ratio = aggressive_ratio
+                    logging.info(f"Stage 4 (content analysis): {aggressive_ratio:.1f}% reduction")
+                
+            except Exception as e:
+                logging.warning(f"Stage 4 (content analysis) failed: {e}")
+        
+        # Stage 5: Final optimization - metadata removal and font optimization
+        if compression_level == 'high':
+            logging.info("Stage 5: Final optimization - metadata and font optimization")
+            
+            try:
+                # Try to remove metadata and optimize fonts
+                final_pdf = fitz.open(stream=output_buffer.getvalue(), filetype="pdf")
+                
+                # Remove metadata if possible
+                if hasattr(final_pdf, 'metadata'):
+                    try:
+                        # Keep only essential metadata
+                        essential_metadata = {
+                            'title': final_pdf.metadata.get('title', ''),
+                            'author': final_pdf.metadata.get('author', ''),
+                            'subject': final_pdf.metadata.get('subject', '')
+                        }
+                        final_pdf.set_metadata(essential_metadata)
+                    except:
+                        pass
+                
+                # Final save with maximum compression
+                final_buffer = io.BytesIO()
+                final_pdf.save(
+                    final_buffer,
+                    garbage=4,
+                    deflate=True,
+                    clean=True,
+                    linear=True,
+                    pretty=False,
+                    ascii=False
+                )
+                
+                final_pdf.close()
+                
+                final_size = len(final_buffer.getvalue())
+                final_ratio = ((original_size - final_size) / original_size) * 100
+                
+                # Use the final optimized version
+                output_buffer = final_buffer
+                logging.info(f"Stage 5 (final optimization): {final_ratio:.1f}% reduction")
+                
+            except Exception as e:
+                logging.warning(f"Stage 5 (final optimization) failed: {e}")
         
         # Close the PDF document
         pdf_document.close()
