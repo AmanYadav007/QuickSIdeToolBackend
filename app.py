@@ -847,6 +847,195 @@ def compress_pdf():
         logging.error(f"PDF compression: Error processing '{file.filename}': {e}", exc_info=True)
         return jsonify({"error": f"Failed to compress PDF: {str(e)}"}), 500
 
+# ADVANCED PDF COMPRESSION ENDPOINT
+@app.route('/compress-pdf-advanced', methods=['POST'])
+def compress_pdf_advanced():
+    """
+    Advanced PDF compression using multiple free libraries and smart algorithms
+    Targets 50%+ compression for most PDFs
+    """
+    if 'file' not in request.files:
+        logging.error("Advanced PDF compression: No file part in the request.")
+        return jsonify({"error": "No file part in the request."}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        logging.error("Advanced PDF compression: No selected file.")
+        return jsonify({"error": "No selected file."}), 400
+    if not file.filename.lower().endswith('.pdf'):
+        logging.error(f"Advanced PDF compression: Invalid file type uploaded: {file.filename}")
+        return jsonify({"error": "Invalid file type. Only PDF files are accepted."}), 400
+
+    # Get compression parameters
+    compression_level = request.form.get('compression_level', 'medium')
+    
+    try:
+        file.stream.seek(0)
+        pdf_bytes = file.read()
+        original_size = len(pdf_bytes)
+        
+        logging.info(f"Advanced compression starting for '{file.filename}' - Original: {original_size/1024:.1f}KB")
+        
+        # Stage 1: Basic PyMuPDF compression
+        pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        stage1_buffer = io.BytesIO()
+        
+        # Use aggressive settings for better compression
+        pdf_document.save(
+            stage1_buffer,
+            garbage=4,      # Remove all unused objects
+            deflate=True,   # Compress streams
+            clean=True,     # Clean content streams
+            linear=True,    # Optimize for web
+            pretty=False,   # Remove formatting
+            ascii=False     # Use binary instead of ASCII
+        )
+        
+        stage1_size = len(stage1_buffer.getvalue())
+        stage1_ratio = ((original_size - stage1_size) / original_size) * 100
+        logging.info(f"Stage 1 (PyMuPDF): {stage1_ratio:.1f}% reduction")
+        
+        # Stage 2: Image compression (if images exist)
+        stage2_buffer = io.BytesIO()
+        try:
+            # Check if PDF has images
+            has_images = False
+            for page_num in range(len(pdf_document)):
+                page = pdf_document[page_num]
+                if page.get_images():
+                    has_images = True
+                    break
+            
+            if has_images and compression_level in ['medium', 'high']:
+                logging.info("Stage 2: Compressing images within PDF")
+                
+                # Create a new PDF with compressed images
+                new_pdf = fitz.open()
+                
+                for page_num in range(len(pdf_document)):
+                    page = pdf_document[page_num]
+                    new_page = new_pdf.new_page(width=page.rect.width, height=page.rect.height)
+                    
+                    # Copy page content
+                    new_page.show_pdf_page(page.rect, pdf_document, page_num)
+                    
+                    # Compress images on this page
+                    image_list = page.get_images()
+                    for img_index, img in enumerate(image_list):
+                        try:
+                            xref = img[0]
+                            img_info = pdf_document.extract_image(xref)
+                            
+                            if img_info and img_info["size"] > 50000:  # > 50KB
+                                # Compress image using Pillow
+                                from PIL import Image
+                                img_data = img_info["image"]
+                                img_pil = Image.open(io.BytesIO(img_data))
+                                
+                                # Determine compression quality based on level
+                                if compression_level == 'high':
+                                    quality = 60  # Aggressive compression
+                                else:
+                                    quality = 80  # Balanced compression
+                                
+                                # Convert to JPEG for better compression
+                                if img_pil.mode in ['RGBA', 'LA']:
+                                    img_pil = img_pil.convert('RGB')
+                                
+                                # Compress image
+                                compressed_img_buffer = io.BytesIO()
+                                img_pil.save(compressed_img_buffer, 'JPEG', quality=quality, optimize=True)
+                                compressed_img_buffer.seek(0)
+                                
+                                # Replace image in PDF
+                                new_page.insert_image(page.rect, stream=compressed_img_buffer.getvalue())
+                                
+                        except Exception as e:
+                            logging.warning(f"Could not compress image {img_index} on page {page_num}: {e}")
+                            continue
+                
+                # Save compressed PDF
+                new_pdf.save(stage2_buffer, garbage=4, deflate=True, clean=True, linear=True)
+                new_pdf.close()
+                
+                stage2_size = len(stage2_buffer.getvalue())
+                stage2_ratio = ((original_size - stage2_size) / original_size) * 100
+                logging.info(f"Stage 2 (Image compression): {stage2_ratio:.1f}% reduction")
+                
+                # Use stage 2 if it's better
+                if stage2_ratio > stage1_ratio:
+                    output_buffer = stage2_buffer
+                    final_ratio = stage2_ratio
+                    logging.info(f"Stage 2 selected: {stage2_ratio:.1f}% reduction")
+                else:
+                    output_buffer = stage1_buffer
+                    final_ratio = stage1_ratio
+                    logging.info(f"Stage 1 selected: {stage1_ratio:.1f}% reduction")
+            else:
+                output_buffer = stage1_buffer
+                final_ratio = stage1_ratio
+                logging.info(f"No images found, using Stage 1: {stage1_ratio:.1f}% reduction")
+                
+        except Exception as e:
+            logging.warning(f"Stage 2 (image compression) failed: {e}")
+            output_buffer = stage1_buffer
+            final_ratio = stage1_ratio
+        
+        # Stage 3: Advanced optimization for high compression
+        if compression_level == 'high' and final_ratio < 30:  # If we haven't achieved good compression
+            logging.info("Stage 3: Advanced optimization techniques")
+            
+            try:
+                # Try pikepdf for advanced compression
+                import pikepdf
+                
+                # Convert to pikepdf format
+                output_buffer.seek(0)
+                pdf_pike = pikepdf.open(output_buffer)
+                
+                # Advanced compression settings
+                pdf_pike.save(
+                    output_buffer,
+                    object_streams=True,  # Enable object streams
+                    preserve_pdfa=False,   # Allow PDF/A restrictions to be removed
+                    recompress_flate=True, # Recompress existing streams
+                    deterministic_id=False  # Allow ID changes for better compression
+                )
+                
+                final_size = len(output_buffer.getvalue())
+                final_ratio = ((original_size - final_size) / original_size) * 100
+                logging.info(f"Stage 3 (pikepdf): {final_ratio:.1f}% reduction")
+                
+            except ImportError:
+                logging.info("pikepdf not available, skipping Stage 3")
+            except Exception as e:
+                logging.warning(f"Stage 3 (pikepdf) failed: {e}")
+        
+        # Close the PDF document
+        pdf_document.close()
+        
+        # Final size calculation
+        output_buffer.seek(0)
+        final_size = len(output_buffer.getvalue())
+        final_ratio = ((original_size - final_size) / original_size) * 100
+        
+        # Generate output filename
+        base_name = os.path.splitext(file.filename)[0]
+        output_filename = f"compressed_{base_name}.pdf"
+        
+        logging.info(f"Advanced PDF compression: '{file.filename}' - Original: {original_size/1024:.1f}KB, Final: {final_size/1024:.1f}KB, Total Reduction: {final_ratio:.1f}%")
+        
+        return send_file(
+            output_buffer,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=output_filename
+        )
+
+    except Exception as e:
+        logging.error(f"Advanced PDF compression: Error processing '{file.filename}': {e}", exc_info=True)
+        return jsonify({"error": f"Failed to compress PDF: {str(e)}"}), 500
+
 # Main entry point
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=4000)
