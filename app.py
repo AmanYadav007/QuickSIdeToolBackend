@@ -1001,50 +1001,65 @@ def compress_pdf_advanced():
                 pdf_pike = pikepdf.open(output_buffer)
                 
                 # Advanced compression settings (using correct parameters)
-                pdf_pike.save(
-                    output_buffer,
-                    preserve_pdfa=False,   # Allow PDF/A restrictions to be removed
-                    recompress_flate=True, # Recompress existing streams
-                    deterministic_id=False  # Allow ID changes for better compression
-                )
+                stage3_buffer = io.BytesIO()
+                pdf_pike.save(stage3_buffer)
                 
-                final_size = len(output_buffer.getvalue())
-                final_ratio = ((original_size - final_size) / original_size) * 100
-                logging.info(f"Stage 3 (pikepdf): {final_ratio:.1f}% reduction")
+                stage3_size = len(stage3_buffer.getvalue())
+                stage3_ratio = ((original_size - stage3_size) / original_size) * 100
+                
+                # Only use stage 3 if it actually improves compression
+                if stage3_ratio > final_ratio:
+                    output_buffer = stage3_buffer
+                    final_ratio = stage3_ratio
+                    logging.info(f"Stage 3 (pikepdf): {stage3_ratio:.1f}% reduction - SELECTED")
+                else:
+                    logging.info(f"Stage 3 (pikepdf): {stage3_ratio:.1f}% reduction - REJECTED (worse than previous)")
                 
             except ImportError:
                 logging.info("pikepdf not available, skipping Stage 3")
             except Exception as e:
                 logging.warning(f"Stage 3 (pikepdf) failed: {e}")
         
-        # Stage 4: Content analysis and aggressive optimization
-        if compression_level == 'high' and final_ratio < 20:  # Still not good enough
+        # Stage 4: Content analysis and aggressive optimization (only if previous stages didn't work well)
+        if compression_level == 'high' and final_ratio < 15:  # Only if we still have poor compression
             logging.info("Stage 4: Content analysis and aggressive optimization")
             
             try:
                 # Analyze PDF content and apply aggressive techniques
                 pdf_document = fitz.open(stream=output_buffer.getvalue(), filetype="pdf")
                 
+                # Check if PDF is corrupted or has issues
+                if pdf_document.page_count == 0:
+                    logging.warning("Stage 4: PDF appears corrupted, skipping")
+                    pdf_document.close()
+                    return jsonify({"error": "PDF appears corrupted and cannot be compressed"}), 400
+                
                 # Create new PDF with aggressive settings
                 aggressive_pdf = fitz.open()
                 
                 for page_num in range(len(pdf_document)):
-                    page = pdf_document[page_num]
-                    
-                    # Get page content
-                    text_content = page.get_text()
-                    image_list = page.get_images()
-                    
-                    # Create new page
-                    new_page = aggressive_pdf.new_page(width=page.rect.width, height=page.rect.height)
-                    
-                    # If page has mostly text, optimize for text
-                    if len(text_content) > 100 and len(image_list) < 3:
-                        # Text-heavy page - use aggressive text optimization
-                        new_page.insert_text((50, 50), text_content, fontsize=10)
-                    else:
-                        # Image-heavy page - copy with aggressive compression
-                        new_page.show_pdf_page(page.rect, pdf_document, page_num)
+                    try:
+                        page = pdf_document[page_num]
+                        
+                        # Get page content safely
+                        text_content = page.get_text()
+                        image_list = page.get_images()
+                        
+                        # Create new page
+                        new_page = aggressive_pdf.new_page(width=page.rect.width, height=page.rect.height)
+                        
+                        # If page has mostly text, optimize for text
+                        if len(text_content) > 100 and len(image_list) < 3:
+                            # Text-heavy page - use aggressive text optimization
+                            new_page.insert_text((50, 50), text_content, fontsize=10)
+                        else:
+                            # Image-heavy page - copy with aggressive compression
+                            new_page.show_pdf_page(page.rect, pdf_document, page_num)
+                    except Exception as e:
+                        logging.warning(f"Stage 4: Error processing page {page_num}: {e}")
+                        # Create empty page as fallback
+                        new_page = aggressive_pdf.new_page(width=page.rect.width, height=page.rect.height)
+                        continue
                 
                 # Save with maximum compression
                 aggressive_buffer = io.BytesIO()
@@ -1064,34 +1079,24 @@ def compress_pdf_advanced():
                 aggressive_size = len(aggressive_buffer.getvalue())
                 aggressive_ratio = ((original_size - aggressive_size) / original_size) * 100
                 
+                # Only use if it actually improves compression
                 if aggressive_ratio > final_ratio:
                     output_buffer = aggressive_buffer
                     final_ratio = aggressive_ratio
-                    logging.info(f"Stage 4 (content analysis): {aggressive_ratio:.1f}% reduction")
+                    logging.info(f"Stage 4 (content analysis): {aggressive_ratio:.1f}% reduction - SELECTED")
+                else:
+                    logging.info(f"Stage 4 (content analysis): {aggressive_ratio:.1f}% reduction - REJECTED (worse than previous)")
                 
             except Exception as e:
                 logging.warning(f"Stage 4 (content analysis) failed: {e}")
         
-        # Stage 5: Final optimization - metadata removal and font optimization
-        if compression_level == 'high':
+        # Stage 5: Final optimization - only if we have good compression so far
+        if compression_level == 'high' and final_ratio > 10:  # Only if we're already achieving good compression
             logging.info("Stage 5: Final optimization - metadata and font optimization")
             
             try:
                 # Try to remove metadata and optimize fonts
                 final_pdf = fitz.open(stream=output_buffer.getvalue(), filetype="pdf")
-                
-                # Remove metadata if possible
-                if hasattr(final_pdf, 'metadata'):
-                    try:
-                        # Keep only essential metadata
-                        essential_metadata = {
-                            'title': final_pdf.metadata.get('title', ''),
-                            'author': final_pdf.metadata.get('author', ''),
-                            'subject': final_pdf.metadata.get('subject', '')
-                        }
-                        final_pdf.set_metadata(essential_metadata)
-                    except:
-                        pass
                 
                 # Final save with maximum compression
                 final_buffer = io.BytesIO()
@@ -1110,9 +1115,12 @@ def compress_pdf_advanced():
                 final_size = len(final_buffer.getvalue())
                 final_ratio = ((original_size - final_size) / original_size) * 100
                 
-                # Use the final optimized version
-                output_buffer = final_buffer
-                logging.info(f"Stage 5 (final optimization): {final_ratio:.1f}% reduction")
+                # Only use if it maintains or improves compression
+                if final_ratio >= final_ratio * 0.9:  # Allow 10% tolerance
+                    output_buffer = final_buffer
+                    logging.info(f"Stage 5 (final optimization): {final_ratio:.1f}% reduction - SELECTED")
+                else:
+                    logging.info(f"Stage 5 (final optimization): {final_ratio:.1f}% reduction - REJECTED (degraded too much)")
                 
             except Exception as e:
                 logging.warning(f"Stage 5 (final optimization) failed: {e}")
@@ -1120,16 +1128,79 @@ def compress_pdf_advanced():
         # Close the PDF document
         pdf_document.close()
         
+        # Smart fallback: If we haven't achieved good compression, try alternative strategies
+        if final_ratio < 10:  # Less than 10% compression achieved
+            logging.info("Smart fallback: Trying alternative compression strategies")
+            
+            try:
+                # Strategy 1: Try with different PyMuPDF settings
+                pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+                fallback1_buffer = io.BytesIO()
+                
+                pdf_document.save(
+                    fallback1_buffer,
+                    garbage=4,
+                    deflate=True,
+                    clean=True,
+                    linear=False,  # Try without linear optimization
+                    pretty=False,
+                    ascii=False
+                )
+                
+                fallback1_size = len(fallback1_buffer.getvalue())
+                fallback1_ratio = ((original_size - fallback1_size) / original_size) * 100
+                
+                if fallback1_ratio > final_ratio:
+                    output_buffer = fallback1_buffer
+                    final_ratio = fallback1_ratio
+                    logging.info(f"Fallback 1 (PyMuPDF alternative): {fallback1_ratio:.1f}% reduction - SELECTED")
+                
+                # Strategy 2: Try with minimal settings (sometimes less is more)
+                fallback2_buffer = io.BytesIO()
+                pdf_document.save(
+                    fallback2_buffer,
+                    garbage=1,      # Minimal garbage collection
+                    deflate=True,   # Keep compression
+                    clean=False,    # Don't clean (might preserve structure)
+                    linear=False,   # No linear optimization
+                    pretty=True,    # Keep formatting
+                    ascii=False
+                )
+                
+                fallback2_size = len(fallback2_buffer.getvalue())
+                fallback2_ratio = ((original_size - fallback2_size) / original_size) * 100
+                
+                if fallback2_ratio > final_ratio:
+                    output_buffer = fallback2_buffer
+                    final_ratio = fallback2_ratio
+                    logging.info(f"Fallback 2 (PyMuPDF minimal): {fallback2_ratio:.1f}% reduction - SELECTED")
+                
+                pdf_document.close()
+                
+            except Exception as e:
+                logging.warning(f"Smart fallback failed: {e}")
+        
         # Final size calculation
         output_buffer.seek(0)
         final_size = len(output_buffer.getvalue())
         final_ratio = ((original_size - final_size) / original_size) * 100
         
+        # Check if the PDF was already well-optimized
+        if final_ratio < 5:  # Less than 5% reduction
+            if final_ratio < 0:
+                logging.info(f"PDF '{file.filename}' appears to be already well-optimized or contains complex content that resists compression")
+            else:
+                logging.info(f"PDF '{file.filename}' achieved minimal compression - may already be optimized")
+        
+        # Special case for small PDFs
+        if original_size < 100000:  # Less than 100KB
+            logging.info(f"PDF '{file.filename}' is already small ({original_size/1024:.1f}KB) - compression may not provide significant benefits")
+        
+        logging.info(f"Advanced PDF compression: '{file.filename}' - Original: {original_size/1024:.1f}KB, Final: {final_size/1024:.1f}KB, Total Reduction: {final_ratio:.1f}%")
+        
         # Generate output filename
         base_name = os.path.splitext(file.filename)[0]
         output_filename = f"compressed_{base_name}.pdf"
-        
-        logging.info(f"Advanced PDF compression: '{file.filename}' - Original: {original_size/1024:.1f}KB, Final: {final_size/1024:.1f}KB, Total Reduction: {final_ratio:.1f}%")
         
         return send_file(
             output_buffer,
