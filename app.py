@@ -8,6 +8,7 @@ from docx import Document
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 import fitz  # PyMuPDF for better text extraction
+from PIL import Image, ImageOps, ImageEnhance  # Add Pillow imports for image processing
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -306,6 +307,377 @@ def pdf_to_docx():
     except Exception as e:
         logging.error(f"PDF to DOCX: Error converting '{file.filename}': {e}", exc_info=True)
         return jsonify({"error": f"Failed to convert PDF to DOCX: {str(e)}"}), 500
+
+# IMAGE COMPRESSION ENDPOINT
+@app.route('/compress-image', methods=['POST'])
+def compress_image():
+    """
+    Advanced server-side image compression with multiple options:
+    - Quality control (1-100)
+    - Format conversion (JPEG, PNG, WebP)
+    - Resize options
+    - Metadata preservation
+    - Advanced compression algorithms
+    """
+    if 'file' not in request.files:
+        logging.error("Image compression: No file part in the request.")
+        return jsonify({"error": "No file part in the request."}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        logging.error("Image compression: No selected file.")
+        return jsonify({"error": "No selected file."}), 400
+
+    # Get compression parameters
+    quality = int(request.form.get('quality', 85))
+    output_format = request.form.get('format', 'JPEG').upper()
+    resize_width = request.form.get('resize_width')
+    resize_height = request.form.get('resize_height')
+    preserve_metadata = request.form.get('preserve_metadata', 'false').lower() == 'true'
+    optimize = request.form.get('optimize', 'true').lower() == 'true'
+    
+    # Validate quality range
+    if not 1 <= quality <= 100:
+        return jsonify({"error": "Quality must be between 1 and 100"}), 400
+
+    try:
+        file.stream.seek(0)
+        
+        # Open image with Pillow
+        with Image.open(file.stream) as img:
+            # Convert to RGB if saving as JPEG
+            if output_format == 'JPEG' and img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Handle resize if specified
+            if resize_width or resize_height:
+                current_width, current_height = img.size
+                
+                if resize_width and resize_height:
+                    # Both dimensions specified - resize to exact size
+                    new_size = (int(resize_width), int(resize_height))
+                elif resize_width:
+                    # Only width specified - maintain aspect ratio
+                    ratio = int(resize_width) / current_width
+                    new_size = (int(resize_width), int(current_height * ratio))
+                else:
+                    # Only height specified - maintain aspect ratio
+                    ratio = int(resize_height) / current_height
+                    new_size = (int(current_width * ratio), int(resize_height))
+                
+                # Use high-quality resampling
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+            
+            # Prepare output buffer
+            output_buffer = io.BytesIO()
+            
+            # Save with appropriate format and options
+            if output_format == 'JPEG':
+                # JPEG specific options
+                save_kwargs = {
+                    'format': 'JPEG',
+                    'quality': quality,
+                    'optimize': optimize,
+                    'progressive': True  # Progressive JPEG for better compression
+                }
+                
+                # Preserve EXIF data if requested
+                if preserve_metadata and 'exif' in img.info:
+                    save_kwargs['exif'] = img.info['exif']
+                
+                img.save(output_buffer, **save_kwargs)
+                
+            elif output_format == 'PNG':
+                # PNG specific options
+                save_kwargs = {
+                    'format': 'PNG',
+                    'optimize': optimize
+                }
+                
+                # PNG doesn't use quality parameter, but we can optimize
+                if optimize:
+                    # Convert to P mode if image is grayscale for better compression
+                    if img.mode == 'L':
+                        img = img.convert('P', palette=Image.ADAPTIVE, colors=256)
+                
+                img.save(output_buffer, **save_kwargs)
+                
+            elif output_format == 'WEBP':
+                # WebP specific options
+                save_kwargs = {
+                    'format': 'WEBP',
+                    'quality': quality,
+                    'method': 6,  # Compression method (0-6, higher = better compression but slower)
+                    'lossless': False
+                }
+                
+                img.save(output_buffer, **save_kwargs)
+                
+            else:
+                return jsonify({"error": f"Unsupported output format: {output_format}"}), 400
+            
+            output_buffer.seek(0)
+            
+            # Generate output filename
+            base_name = os.path.splitext(file.filename)[0]
+            extension = output_format.lower()
+            if output_format == 'JPEG':
+                extension = 'jpg'
+            output_filename = f"{base_name}_compressed.{extension}"
+            
+            logging.info(f"Image compression: Successfully compressed '{file.filename}' to {output_format} with quality {quality}")
+            
+            return send_file(
+                output_buffer,
+                mimetype=f'image/{output_format.lower()}',
+                as_attachment=True,
+                download_name=output_filename
+            )
+
+    except Exception as e:
+        logging.error(f"Image compression: Error processing '{file.filename}': {e}", exc_info=True)
+        return jsonify({"error": f"Failed to compress image: {str(e)}"}), 500
+
+# BATCH IMAGE COMPRESSION ENDPOINT
+@app.route('/compress-images-batch', methods=['POST'])
+def compress_images_batch():
+    """
+    Batch compress multiple images with the same settings
+    Returns a ZIP file containing all compressed images
+    """
+    if 'files' not in request.files:
+        return jsonify({"error": "No files provided"}), 400
+    
+    files = request.files.getlist('files')
+    if not files or all(f.filename == '' for f in files):
+        return jsonify({"error": "No valid files selected"}), 400
+    
+    # Get compression parameters
+    quality = int(request.form.get('quality', 85))
+    output_format = request.form.get('format', 'JPEG').upper()
+    optimize = request.form.get('optimize', 'true').lower() == 'true'
+    
+    try:
+        import zipfile
+        
+        # Create ZIP buffer
+        zip_buffer = io.BytesIO()
+        
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for file in files:
+                if file.filename == '':
+                    continue
+                    
+                try:
+                    file.stream.seek(0)
+                    
+                    with Image.open(file.stream) as img:
+                        # Convert to RGB if saving as JPEG
+                        if output_format == 'JPEG' and img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        
+                        # Prepare output buffer for this image
+                        img_buffer = io.BytesIO()
+                        
+                        # Save with appropriate format
+                        if output_format == 'JPEG':
+                            img.save(img_buffer, format='JPEG', quality=quality, optimize=optimize, progressive=True)
+                        elif output_format == 'PNG':
+                            img.save(img_buffer, format='PNG', optimize=optimize)
+                        elif output_format == 'WEBP':
+                            img.save(img_buffer, format='WEBP', quality=quality, method=6, lossless=False)
+                        
+                        img_buffer.seek(0)
+                        
+                        # Generate filename for this image
+                        base_name = os.path.splitext(file.filename)[0]
+                        extension = output_format.lower()
+                        if output_format == 'JPEG':
+                            extension = 'jpg'
+                        output_filename = f"{base_name}_compressed.{extension}"
+                        
+                        # Add to ZIP
+                        zip_file.writestr(output_filename, img_buffer.getvalue())
+                        
+                except Exception as e:
+                    logging.warning(f"Failed to compress {file.filename}: {e}")
+                    continue
+        
+        zip_buffer.seek(0)
+        
+        logging.info(f"Batch compression: Successfully compressed {len(files)} images to {output_format}")
+        
+        return send_file(
+            zip_buffer,
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name='compressed_images.zip'
+        )
+        
+    except Exception as e:
+        logging.error(f"Batch compression: Error processing files: {e}", exc_info=True)
+        return jsonify({"error": f"Failed to process batch compression: {str(e)}"}), 500
+
+# FILE CONVERSION ENDPOINTS
+@app.route('/convert/pdf-to-word', methods=['POST'])
+def convert_pdf_to_word():
+    """
+    Convert PDF to Word document (.docx)
+    This is an alias for the existing pdf-to-docx endpoint
+    """
+    return pdf_to_docx()
+
+@app.route('/convert/pdf-to-excel', methods=['POST'])
+def convert_pdf_to_excel():
+    """
+    Convert PDF to Excel spreadsheet (.xlsx)
+    Extracts tables and text from PDF and creates Excel file
+    """
+    if 'file' not in request.files:
+        logging.error("PDF to Excel: No file part in the request.")
+        return jsonify({"error": "No file part in the request."}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        logging.error("PDF to Excel: No selected file.")
+        return jsonify({"error": "No selected file."}), 400
+    if not file.filename.lower().endswith('.pdf'):
+        logging.error(f"PDF to Excel: Invalid file type uploaded: {file.filename}")
+        return jsonify({"error": "Invalid file type. Only PDF files are accepted."}), 400
+
+    try:
+        file.stream.seek(0)
+        
+        # Open PDF with PyMuPDF for text and table extraction
+        pdf_document = fitz.open(stream=file.stream, filetype="pdf")
+        
+        # Create Excel file using openpyxl
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, Alignment, Border, Side
+        except ImportError:
+            # Fallback to CSV if openpyxl is not available
+            import csv
+            csv_buffer = io.BytesIO()
+            csv_writer = csv.writer(csv_buffer)
+            
+            # Extract text from each page
+            for page_num in range(len(pdf_document)):
+                page = pdf_document[page_num]
+                text = page.get_text()
+                if text.strip():
+                    csv_writer.writerow([f"Page {page_num + 1}"])
+                    for line in text.split('\n'):
+                        if line.strip():
+                            csv_writer.writerow([line.strip()])
+                    csv_writer.writerow([])  # Empty row between pages
+            
+            csv_buffer.seek(0)
+            pdf_document.close()
+            
+            # Generate output filename
+            output_filename = file.filename.replace('.pdf', '.csv')
+            if not output_filename.endswith('.csv'):
+                output_filename += '.csv'
+            
+            logging.info(f"PDF to Excel: Successfully converted '{file.filename}' to CSV (fallback).")
+            return send_file(
+                csv_buffer,
+                mimetype='text/csv',
+                as_attachment=True,
+                download_name=output_filename
+            )
+        
+        # Use openpyxl for proper Excel creation
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "PDF Content"
+        
+        # Set up styles
+        header_font = Font(bold=True, size=14)
+        page_font = Font(bold=True, size=12, color="366092")
+        content_font = Font(size=11)
+        
+        # Extract content from each page
+        row = 1
+        for page_num in range(len(pdf_document)):
+            page = pdf_document[page_num]
+            
+            # Add page header
+            ws.cell(row=row, column=1, value=f"Page {page_num + 1}").font = page_font
+            row += 1
+            
+            # Extract text
+            text = page.get_text()
+            if text.strip():
+                # Split text into lines and add to Excel
+                lines = text.split('\n')
+                for line in lines:
+                    if line.strip():
+                        ws.cell(row=row, column=1, value=line.strip()).font = content_font
+                        row += 1
+            
+            # Try to extract tables
+            try:
+                tables = page.get_tables()
+                for table_idx, table in enumerate(tables):
+                    if table:
+                        # Add table header
+                        ws.cell(row=row, column=1, value=f"Table {table_idx + 1}").font = header_font
+                        row += 1
+                        
+                        # Add table data
+                        for table_row in table:
+                            for col_idx, cell_value in enumerate(table_row):
+                                if cell_value and str(cell_value).strip():
+                                    ws.cell(row=row, column=col_idx + 1, value=str(cell_value).strip()).font = content_font
+                            row += 1
+                        row += 1  # Space after table
+            except Exception as e:
+                logging.warning(f"Could not extract tables from page {page_num + 1}: {e}")
+            
+            row += 1  # Space between pages
+        
+        # Auto-adjust column widths
+        for column in ws.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 50)  # Cap at 50 characters
+            ws.column_dimensions[column_letter].width = adjusted_width
+        
+        # Close the PDF document
+        pdf_document.close()
+        
+        # Save the Excel document to a bytes buffer
+        excel_buffer = io.BytesIO()
+        wb.save(excel_buffer)
+        excel_buffer.seek(0)
+        
+        # Generate output filename
+        output_filename = file.filename.replace('.pdf', '.xlsx')
+        if not output_filename.endswith('.xlsx'):
+            output_filename += '.xlsx'
+        
+        logging.info(f"PDF to Excel: Successfully converted '{file.filename}' to Excel.")
+        return send_file(
+            excel_buffer,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=output_filename
+        )
+
+    except fitz.FileDataError as e:
+        logging.error(f"PDF to Excel: Invalid or corrupted PDF file '{file.filename}': {e}")
+        return jsonify({"error": f"Invalid PDF file: {str(e)}"}), 400
+    except Exception as e:
+        logging.error(f"PDF to Excel: Error converting '{file.filename}': {e}", exc_info=True)
+        return jsonify({"error": f"Failed to convert PDF to Excel: {str(e)}"}), 500
 
 # Main entry point
 if __name__ == '__main__':
