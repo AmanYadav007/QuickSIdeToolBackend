@@ -231,7 +231,9 @@ def pdf_to_docx():
         file.stream.seek(0)
         
         # Open PDF with PyMuPDF for better text extraction
-        pdf_document = fitz.open(stream=file.stream, filetype="pdf")
+        # PyMuPDF expects bytes for 'stream', not a file-like object
+        pdf_bytes = file.read()
+        pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
         
         # Create a new Word document
         doc = Document()
@@ -549,7 +551,8 @@ def convert_pdf_to_excel():
         file.stream.seek(0)
         
         # Open PDF with PyMuPDF for text and table extraction
-        pdf_document = fitz.open(stream=file.stream, filetype="pdf")
+        pdf_bytes = file.read()
+        pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
         
         # Create Excel file using openpyxl
         try:
