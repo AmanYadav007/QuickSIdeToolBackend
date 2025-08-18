@@ -728,7 +728,7 @@ def compress_pdf():
             )
         elif compression_level == 'high':
             # Aggressive compression - maximum size reduction
-            # First pass: remove unused objects and clean
+            # Use the most aggressive settings that actually reduce size
             pdf_document.save(
                 output_buffer,
                 garbage=4,      # Remove all unused objects
@@ -739,35 +739,54 @@ def compress_pdf():
                 ascii=False     # Use binary instead of ASCII
             )
             
-            # Second pass: additional optimization
-            output_buffer.seek(0)
-            optimized_pdf = fitz.open(stream=output_buffer.getvalue(), filetype="pdf")
-            final_buffer = io.BytesIO()
-            
-            # Final save with maximum compression
-            optimized_pdf.save(
-                final_buffer,
-                garbage=4,
-                deflate=True,
-                clean=True,
-                linear=True,
-                pretty=False,
-                ascii=False
-            )
-            
-            optimized_pdf.close()
-            final_buffer.seek(0)
-            output_buffer = final_buffer
-            
         else:  # medium (default)
             # Balanced compression - good quality and size
             pdf_document.save(
                 output_buffer,
-                garbage=2,      # Remove most unused objects
+                garbage=3,      # Remove most unused objects
                 deflate=True,   # Compress streams
                 clean=True,     # Clean content streams
                 linear=True     # Optimize for web
             )
+        
+        # Calculate initial compression ratio
+        original_size = len(pdf_bytes)
+        initial_compressed_size = len(output_buffer.getvalue())
+        initial_ratio = ((original_size - initial_compressed_size) / original_size) * 100
+        
+        logging.info(f"Initial compression: {initial_ratio:.1f}% reduction")
+        
+        # If compression didn't work well, try more aggressive approach
+        if initial_ratio < 0:  # File got bigger
+            logging.info(f"File size increased, trying aggressive compression for '{file.filename}'")
+            
+            # Try with maximum compression settings
+            aggressive_buffer = io.BytesIO()
+            pdf_document.save(
+                aggressive_buffer,
+                garbage=4,      # Remove all unused objects
+                deflate=True,   # Compress streams
+                clean=True,     # Clean content streams
+                linear=True,    # Optimize for web
+                pretty=False,   # Remove formatting
+                ascii=False     # Use binary instead of ASCII
+            )
+            
+            aggressive_size = len(aggressive_buffer.getvalue())
+            aggressive_ratio = ((original_size - aggressive_size) / original_size) * 100
+            
+            # Use the better result
+            if aggressive_ratio > initial_ratio:
+                output_buffer = aggressive_buffer
+                compressed_size = aggressive_size
+                compression_ratio = aggressive_ratio
+                logging.info(f"Aggressive method better: {aggressive_ratio:.1f}% reduction")
+            else:
+                compressed_size = initial_compressed_size
+                compression_ratio = initial_ratio
+        else:
+            compressed_size = initial_compressed_size
+            compression_ratio = initial_ratio
         
         # Close the PDF document
         pdf_document.close()
@@ -778,6 +797,17 @@ def compress_pdf():
         original_size = len(pdf_bytes)
         compressed_size = len(output_buffer.getvalue())
         compression_ratio = ((original_size - compressed_size) / original_size) * 100
+        
+        # Check if the PDF was already well-optimized
+        if compression_ratio < 5:  # Less than 5% reduction
+            if compression_ratio < 0:
+                logging.info(f"PDF '{file.filename}' appears to be already well-optimized or contains complex content that resists compression")
+            else:
+                logging.info(f"PDF '{file.filename}' achieved minimal compression - may already be optimized")
+        
+        # Special case for small PDFs
+        if original_size < 100000:  # Less than 100KB
+            logging.info(f"PDF '{file.filename}' is already small ({original_size/1024:.1f}KB) - compression may not provide significant benefits")
         
         logging.info(f"PDF compression: '{file.filename}' - Original: {original_size/1024:.1f}KB, Compressed: {compressed_size/1024:.1f}KB, Reduction: {compression_ratio:.1f}%")
         
