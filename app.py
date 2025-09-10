@@ -245,13 +245,19 @@ def remove_pdf_links():
         output_pdf = io.BytesIO()
         
         # Use optimized save settings for better performance
-        pdf.save(
-            output_pdf,
-            compress_streams=True,  # Enable stream compression
-            object_stream_mode=pikepdf.ObjectStreamMode.generate,  # Use object streams
-            normalize_content=True,  # Normalize content streams
-            linearize=True  # Linearize for faster loading
-        )
+        try:
+            pdf.save(
+                output_pdf,
+                compress_streams=True,  # Enable stream compression
+                linearize=True  # Linearize for faster loading
+            )
+        except TypeError as e:
+            if "unexpected keyword argument" in str(e):
+                logging.error(f"Remove Links: Unsupported pikepdf parameter: {e}")
+                # Fallback to basic save without parameters
+                pdf.save(output_pdf)
+            else:
+                raise
         
         output_pdf.seek(0)
         
@@ -456,15 +462,19 @@ def remove_pdf_links_advanced():
         output_pdf = io.BytesIO()
         
         # Use maximum optimization settings
-        pdf.save(
-            output_pdf,
-            compress_streams=True,
-            object_stream_mode=pikepdf.ObjectStreamMode.generate,
-            normalize_content=True,
-            linearize=True,
-            preserve_pdfa=True,  # Preserve PDF/A compliance
-            fix_metadata=True    # Fix metadata issues
-        )
+        try:
+            pdf.save(
+                output_pdf,
+                compress_streams=True,
+                linearize=True
+            )
+        except TypeError as e:
+            if "unexpected keyword argument" in str(e):
+                logging.error(f"Advanced Remove Links: Unsupported pikepdf parameter: {e}")
+                # Fallback to basic save without parameters
+                pdf.save(output_pdf)
+            else:
+                raise
         
         output_pdf.seek(0)
         
