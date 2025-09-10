@@ -280,7 +280,7 @@ def remove_pdf_links():
 
 
 # ADVANCED PDF LINK REMOVER ENDPOINT (ultra-fast processing)
-@app.route('/remove-pdf-links-advanced', methods=['POST'])
+@app.route('/remove-pdf-links-advanced', methods=['POST', 'OPTIONS'])
 def remove_pdf_links_advanced():
     """
     Advanced PDF link removal with maximum performance optimizations:
@@ -290,6 +290,14 @@ def remove_pdf_links_advanced():
     - Advanced link detection
     - Progress tracking
     """
+    # Handle CORS preflight requests
+    if request.method == 'OPTIONS':
+        response = jsonify({'status': 'ok'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+        return response
+    
     if 'file' not in request.files:
         logging.error("Advanced Remove Links: No file part in the request.")
         return jsonify({"error": "No file part in the request."}), 400
@@ -469,22 +477,35 @@ def remove_pdf_links_advanced():
                     f"in {processing_time:.2f}s ({pages_per_second:.1f} pages/s, {links_per_second:.1f} links/s) "
                     f"Size: {original_size_mb:.2f}MB → {file_size_mb:.2f}MB ({compression_ratio:.1f}% reduction)")
 
-        return send_file(
+        response = send_file(
             output_pdf,
             mimetype='application/pdf',
             as_attachment=True,
             download_name=f"links_removed_{file.filename}"
         )
+        
+        # Add CORS headers
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+        
+        return response
 
     except pikepdf.PdfError as e:
         logging.error(f"Advanced Remove Links: Error reading PDF file '{file.filename}': {e}")
-        return jsonify({"error": f"Failed to read PDF for link removal: {str(e)}. It might be corrupted or malformed."}), 400
+        response = jsonify({"error": f"Failed to read PDF for link removal: {str(e)}. It might be corrupted or malformed."})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        return response, 400
     except MemoryError as e:
         logging.error(f"Advanced Remove Links: Memory error processing large PDF '{file.filename}': {e}")
-        return jsonify({"error": "PDF is too large to process. Please try with a smaller file or split it into smaller parts."}), 413
+        response = jsonify({"error": "PDF is too large to process. Please try with a smaller file or split it into smaller parts."})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        return response, 413
     except Exception as e:
         logging.error(f"Advanced Remove Links: Error processing PDF '{file.filename}': {e}", exc_info=True)
-        return jsonify({"error": f"Failed to remove links from PDF: An unexpected server error occurred: {str(e)}. It might be corrupted or complex."}), 500
+        response = jsonify({"error": f"Failed to remove links from PDF: An unexpected server error occurred: {str(e)}. It might be corrupted or complex."})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        return response, 500
 
 
 # PDF TO DOCX CONVERSION ENDPOINT
